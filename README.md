@@ -21,6 +21,8 @@ Downloaded content may be subject to Adobe Stock's licensing terms. This script 
 - Robust error handling and logging
 - Clean filename generation
 - Resume capability (skips already downloaded files)
+- Query metadata storage alongside downloaded videos
+- Organized directory structure by search query
 
 ## Installation
 
@@ -92,6 +94,45 @@ Downloaded videos are automatically organized by search query:
 - Query: `"ocean waves"` → Files saved to `downloads/ocean_waves/`
 - Query: `"business meeting"` → Files saved to `downloads/business_meeting/`
 - Query: `"city skyline night"` → Files saved to `downloads/city_skyline_night/`
+
+## Query Metadata
+
+Each download directory includes a `query_metadata.json` file that stores information about the search query and download sessions:
+
+```json
+{
+  "original_query": "ocean waves",
+  "clean_query": "ocean_waves",
+  "created_at": "2025-06-09 15:24:05",
+  "last_updated": "2025-06-09 15:24:28",
+  "total_videos_downloaded": 4,
+  "last_download_session": {
+    "requested_count": 4,
+    "new_downloads": 2,
+    "session_timestamp": "2025-06-09 15:24:28"
+  }
+}
+```
+
+### Reading Metadata
+
+Use the included `read_metadata.py` utility to view metadata:
+
+```bash
+# View all download directories and their metadata
+python read_metadata.py
+
+# View metadata for a specific directory
+python read_metadata.py downloads/ocean_waves
+```
+
+The utility displays:
+- 📁 Directory name
+- 🔍 Original search query
+- 📅 Creation and update timestamps
+- 🎥 Total videos downloaded
+- 📊 Last download session details
+- 📹 Actual video file count
 
 ## Rate Limiting
 

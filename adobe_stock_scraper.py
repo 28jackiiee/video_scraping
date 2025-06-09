@@ -492,6 +492,33 @@ class AdobeStockScraper:
         query_dir = self.download_dir / clean_query
         query_dir.mkdir(exist_ok=True)
         
+        # Create/update metadata file with query information
+        metadata_file = query_dir / "query_metadata.json"
+        metadata = {
+            "original_query": query,
+            "clean_query": clean_query,
+            "created_at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+            "last_updated": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+        }
+        
+        # If metadata file exists, preserve creation time and update last_updated
+        if metadata_file.exists():
+            try:
+                with open(metadata_file, 'r', encoding='utf-8') as f:
+                    existing_metadata = json.load(f)
+                    metadata["created_at"] = existing_metadata.get("created_at", metadata["created_at"])
+            except (json.JSONDecodeError, KeyError):
+                # If existing file is corrupted, start fresh
+                pass
+        
+        # Write metadata file
+        try:
+            with open(metadata_file, 'w', encoding='utf-8') as f:
+                json.dump(metadata, f, indent=2, ensure_ascii=False)
+            self.logger.info(f"Created/updated metadata file: {metadata_file}")
+        except Exception as e:
+            self.logger.warning(f"Failed to create metadata file: {e}")
+        
         # Temporarily update the download directory for this search
         original_download_dir = self.download_dir
         self.download_dir = query_dir
@@ -563,6 +590,22 @@ class AdobeStockScraper:
             
             total_files = existing_count + successful_downloads
             self.logger.info(f"Download complete. {successful_downloads} new videos downloaded. Total: {total_files}/{count}")
+            
+            # Update metadata with download completion info
+            try:
+                metadata["last_updated"] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+                metadata["total_videos_downloaded"] = total_files
+                metadata["last_download_session"] = {
+                    "requested_count": count,
+                    "new_downloads": successful_downloads,
+                    "session_timestamp": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+                }
+                
+                with open(metadata_file, 'w', encoding='utf-8') as f:
+                    json.dump(metadata, f, indent=2, ensure_ascii=False)
+            except Exception as e:
+                self.logger.warning(f"Failed to update metadata file: {e}")
+            
             return total_files
             
         finally:
