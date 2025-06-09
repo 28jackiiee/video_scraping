@@ -498,32 +498,72 @@ class AdobeStockScraper:
         
         self.logger.info(f"Downloads will be saved to: {query_dir}")
         
+        # Check for existing files to determine starting index
+        existing_files = list(query_dir.glob(f"{clean_query}_*.mp4")) + \
+                        list(query_dir.glob(f"{clean_query}_*.mov")) + \
+                        list(query_dir.glob(f"{clean_query}_*.webm"))
+        
+        # Extract existing indices
+        existing_indices = set()
+        for file_path in existing_files:
+            filename = file_path.stem  # Get filename without extension
+            if filename.startswith(f"{clean_query}_"):
+                try:
+                    index_str = filename[len(f"{clean_query}_"):]
+                    index = int(index_str)
+                    existing_indices.add(index)
+                except ValueError:
+                    continue
+        
+        start_index = max(existing_indices) + 1 if existing_indices else 0
+        existing_count = len(existing_indices)
+        
+        if existing_count > 0:
+            self.logger.info(f"Found {existing_count} existing files. Starting new downloads from index {start_index}")
+        
+        # Calculate how many new videos we need
+        needed_count = count - existing_count if count > existing_count else 0
+        
+        if needed_count <= 0:
+            self.logger.info(f"Already have {existing_count} files, which meets or exceeds requested count of {count}")
+            return existing_count
+        
         try:
-            # Search for videos
-            videos = self.search_videos(query, count)
+            # Search for videos (get extra to account for potential duplicates)
+            search_limit = needed_count * 3  # Get 3x more to account for duplicates
+            videos = self.search_videos(query, search_limit)
             
             if not videos:
                 self.logger.warning("No videos found for the given query")
-                return 0
+                return existing_count
             
-            self.logger.info(f"Found {len(videos)} videos to download")
+            self.logger.info(f"Found {len(videos)} videos to process")
             
-            # Download videos with query-based naming
+            # Download videos with query-based naming, starting from the appropriate index
             successful_downloads = 0
+            current_index = start_index
             
-            for i, video in enumerate(videos):
-                self.logger.info(f"Processing video {i+1}/{len(videos)}: {video['title']}")
+            for video in videos:
+                if successful_downloads >= needed_count:
+                    break
+                    
+                self.logger.info(f"Processing video {successful_downloads + 1}/{needed_count}: {video['title']}")
                 
-                # Use query-based naming with index
-                if self.download_video(video, query_prefix=clean_query, index=i):
+                # Use query-based naming with current index
+                if self.download_video(video, query_prefix=clean_query, index=current_index):
                     successful_downloads += 1
+                    current_index += 1
+                else:
+                    # If download failed, still increment index to avoid conflicts
+                    current_index += 1
                 
                 # Rate limiting between downloads
-                if i < len(videos) - 1:
+                if successful_downloads < needed_count:
                     time.sleep(self.delay)
             
-            self.logger.info(f"Download complete. {successful_downloads}/{len(videos)} videos downloaded successfully")
-            return successful_downloads
+            total_files = existing_count + successful_downloads
+            self.logger.info(f"Download complete. {successful_downloads} new videos downloaded. Total: {total_files}/{count}")
+            return total_files
             
         finally:
             # Restore original download directory
