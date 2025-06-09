@@ -64,9 +64,12 @@ class AdobeStockScraper:
             List of video data dictionaries
         """
         videos = []
+        seen_video_ids = set()  # Track video IDs to avoid duplicates
         page = 1
+        max_pages = 10  # Limit to prevent infinite loops
+        consecutive_empty_pages = 0  # Track empty pages to stop early
         
-        while len(videos) < limit:
+        while len(videos) < limit and page <= max_pages and consecutive_empty_pages < 3:
             self.logger.info(f"Searching page {page} for query: '{query}'")
             
             # Try different Adobe Stock URL patterns
@@ -75,11 +78,14 @@ class AdobeStockScraper:
                 "https://stock.adobe.com/search",
             ]
             
+            # Add pagination parameters
             params = {
                 'k': query,
                 'content_type:video': '1',
                 'order': 'relevance',
                 'safe_search': '1',
+                'search_page': page,  # Add page parameter
+                'limit': '200',  # Request more results per page
             }
             
             page_videos = []
@@ -105,13 +111,30 @@ class AdobeStockScraper:
             
             if not page_videos:
                 self.logger.warning(f"No videos found on page {page}")
-                break
-            
-            videos.extend(page_videos)
-            self.logger.info(f"Found {len(page_videos)} videos on page {page}")
+                consecutive_empty_pages += 1
+            else:
+                consecutive_empty_pages = 0
+                
+                # Filter out duplicates and add new videos
+                new_videos = []
+                for video in page_videos:
+                    video_id = video.get('id')
+                    if video_id and video_id not in seen_video_ids:
+                        seen_video_ids.add(video_id)
+                        new_videos.append(video)
+                
+                videos.extend(new_videos)
+                self.logger.info(f"Found {len(new_videos)} new unique videos on page {page} ({len(page_videos) - len(new_videos)} duplicates filtered)")
+                
+                # If we got no new videos on this page, it might mean we've seen them all
+                if len(new_videos) == 0:
+                    consecutive_empty_pages += 1
             
             page += 1
             time.sleep(self.delay)  # Rate limiting
+        
+        if len(videos) < limit:
+            self.logger.warning(f"Only found {len(videos)} unique videos out of requested {limit}. Adobe Stock may not have enough unique results for this query.")
         
         return videos[:limit]
 
@@ -377,13 +400,15 @@ class AdobeStockScraper:
         
         return videos[:20]  # Limit fallback results
 
-    def download_video(self, video_data: Dict, filename: Optional[str] = None) -> bool:
+    def download_video(self, video_data: Dict, filename: Optional[str] = None, query_prefix: Optional[str] = None, index: Optional[int] = None) -> bool:
         """
         Download a video thumbnail.
         
         Args:
             video_data: Video data dictionary
             filename: Optional custom filename
+            query_prefix: Optional query-based prefix for filename
+            index: Optional index for sequential naming
             
         Returns:
             True if download successful, False otherwise
@@ -397,15 +422,26 @@ class AdobeStockScraper:
         
         # Create filename
         if not filename:
-            safe_title = re.sub(r'[^\w\s-]', '', video_data['title'])
-            safe_title = re.sub(r'[-\s]+', '_', safe_title)
-            extension = '.mp4'
-            if download_url:
-                if '.mov' in download_url.lower():
-                    extension = '.mov'
-                elif '.webm' in download_url.lower():
-                    extension = '.webm'
-            filename = f"{video_data['id']}_{safe_title}{extension}"
+            if query_prefix is not None and index is not None:
+                # Use query-based naming: query_0.mp4, query_1.mp4, etc.
+                extension = '.mp4'
+                if download_url:
+                    if '.mov' in download_url.lower():
+                        extension = '.mov'
+                    elif '.webm' in download_url.lower():
+                        extension = '.webm'
+                filename = f"{query_prefix}_{index}{extension}"
+            else:
+                # Fall back to original naming scheme
+                safe_title = re.sub(r'[^\w\s-]', '', video_data['title'])
+                safe_title = re.sub(r'[-\s]+', '_', safe_title)
+                extension = '.mp4'
+                if download_url:
+                    if '.mov' in download_url.lower():
+                        extension = '.mov'
+                    elif '.webm' in download_url.lower():
+                        extension = '.webm'
+                filename = f"{video_data['id']}_{safe_title}{extension}"
         
         filepath = self.download_dir / filename
         
@@ -447,30 +483,51 @@ class AdobeStockScraper:
         """
         self.logger.info(f"Starting scrape for query: '{query}', count: {count}")
         
-        # Search for videos
-        videos = self.search_videos(query, count)
+        # Create a clean directory name from the query
+        clean_query = re.sub(r'[^\w\s-]', '', query)  # Remove special characters
+        clean_query = re.sub(r'[-\s]+', '_', clean_query)  # Replace spaces/hyphens with underscores
+        clean_query = clean_query.lower().strip('_')  # Lowercase and remove leading/trailing underscores
         
-        if not videos:
-            self.logger.warning("No videos found for the given query")
-            return 0
+        # Create query-specific subdirectory
+        query_dir = self.download_dir / clean_query
+        query_dir.mkdir(exist_ok=True)
         
-        self.logger.info(f"Found {len(videos)} videos to download")
+        # Temporarily update the download directory for this search
+        original_download_dir = self.download_dir
+        self.download_dir = query_dir
         
-        # Download videos
-        successful_downloads = 0
+        self.logger.info(f"Downloads will be saved to: {query_dir}")
         
-        for i, video in enumerate(videos, 1):
-            self.logger.info(f"Processing video {i}/{len(videos)}: {video['title']}")
+        try:
+            # Search for videos
+            videos = self.search_videos(query, count)
             
-            if self.download_video(video):
-                successful_downloads += 1
+            if not videos:
+                self.logger.warning("No videos found for the given query")
+                return 0
             
-            # Rate limiting between downloads
-            if i < len(videos):
-                time.sleep(self.delay)
-        
-        self.logger.info(f"Download complete. {successful_downloads}/{len(videos)} videos downloaded successfully")
-        return successful_downloads
+            self.logger.info(f"Found {len(videos)} videos to download")
+            
+            # Download videos with query-based naming
+            successful_downloads = 0
+            
+            for i, video in enumerate(videos):
+                self.logger.info(f"Processing video {i+1}/{len(videos)}: {video['title']}")
+                
+                # Use query-based naming with index
+                if self.download_video(video, query_prefix=clean_query, index=i):
+                    successful_downloads += 1
+                
+                # Rate limiting between downloads
+                if i < len(videos) - 1:
+                    time.sleep(self.delay)
+            
+            self.logger.info(f"Download complete. {successful_downloads}/{len(videos)} videos downloaded successfully")
+            return successful_downloads
+            
+        finally:
+            # Restore original download directory
+            self.download_dir = original_download_dir
 
 
 def main():
@@ -485,10 +542,16 @@ def main():
     # Create scraper instance
     scraper = AdobeStockScraper(download_dir=args.output, delay=args.delay)
     
+    # Create clean query name for the subdirectory
+    clean_query = re.sub(r'[^\w\s-]', '', args.query)
+    clean_query = re.sub(r'[-\s]+', '_', clean_query)
+    clean_query = clean_query.lower().strip('_')
+    
     # Run scraping
     try:
         downloaded_count = scraper.scrape_and_download(args.query, args.count)
-        print(f"\nScraping completed! Downloaded {downloaded_count} videos to '{args.output}' directory.")
+        query_dir = f"{args.output}/{clean_query}"
+        print(f"\nScraping completed! Downloaded {downloaded_count} videos to '{query_dir}' directory.")
         
     except KeyboardInterrupt:
         print("\nScraping interrupted by user.")

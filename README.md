@@ -36,7 +36,7 @@ pip install -r requirements.txt
 ### Basic Usage
 
 ```bash
-python adobe_stock_scraper.py --query "Fisheye Distortion" --count 5
+python3 adobe_stock_scraper.py --query "Time-lapse" --count 5
 ```
 
 ### Advanced Usage
@@ -82,10 +82,16 @@ python adobe_stock_scraper.py -q "technology" -c 8 -o "tech_videos"
 
 ## Output
 
-Downloaded videos are saved as:
-- Format: `{video_id}_{clean_title}.{extension}`
-- Extensions: `.mp4` or `.mov` depending on the source
-- Directory structure: `downloads/` (or your custom output directory)
+Downloaded videos are automatically organized by search query:
+- **Directory structure**: `downloads/{query_name}/`
+- **Format**: `{video_id}_{clean_title}.{extension}`
+- **Extensions**: `.mp4`, `.mov`, or `.webm` depending on the source
+- **Query cleaning**: Spaces become underscores, special characters removed
+
+### Examples:
+- Query: `"ocean waves"` → Files saved to `downloads/ocean_waves/`
+- Query: `"business meeting"` → Files saved to `downloads/business_meeting/`
+- Query: `"city skyline night"` → Files saved to `downloads/city_skyline_night/`
 
 ## Rate Limiting
 
