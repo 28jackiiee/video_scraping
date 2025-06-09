@@ -1,458 +1,500 @@
-import os
-import re
-import time
+#!/usr/bin/env python3
+"""
+Adobe Stock Video Thumbnail Scraper
+
+This script scrapes and downloads thumbnail videos from Adobe Stock
+based on a search query.
+
+Usage:
+    python adobe_stock_scraper.py --query "nature landscape" --count 10
+"""
+
 import requests
-from pathlib import Path
-from urllib.parse import urljoin, urlparse, parse_qs
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.chrome.options import Options
-from webdriver_manager.chrome import ChromeDriverManager
-from bs4 import BeautifulSoup
-from tqdm import tqdm
-from pathvalidate import sanitize_filename
 import json
+import os
+import time
+import argparse
+from pathlib import Path
+from urllib.parse import urljoin, urlparse
+import re
+from typing import List, Dict, Optional
+import logging
+from bs4 import BeautifulSoup
 
-
-class AdobeStockVideoScraper:
-    def __init__(self, download_dir="downloads"):
+class AdobeStockScraper:
+    def __init__(self, download_dir: str = "downloads", delay: float = 1.0):
+        """
+        Initialize the Adobe Stock scraper.
+        
+        Args:
+            download_dir: Directory to save downloaded videos
+            delay: Delay between requests in seconds
+        """
         self.download_dir = Path(download_dir)
         self.download_dir.mkdir(exist_ok=True)
+        self.delay = delay
         self.session = requests.Session()
+        
+        # Set up headers to mimic a real browser
         self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
         })
         
-    def setup_driver(self):
-        """Setup Chrome WebDriver with appropriate options"""
-        chrome_options = Options()
+        # Set up logging
+        logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+        self.logger = logging.getLogger(__name__)
+
+    def search_videos(self, query: str, limit: int = 10) -> List[Dict]:
+        """
+        Search for videos on Adobe Stock.
         
-        # Essential options for stability
-        chrome_options.add_argument('--headless=new')  # Use new headless mode
-        chrome_options.add_argument('--no-sandbox')
-        chrome_options.add_argument('--disable-dev-shm-usage')
-        chrome_options.add_argument('--disable-gpu')
-        chrome_options.add_argument('--disable-web-security')
-        chrome_options.add_argument('--disable-features=VizDisplayCompositor')
-        chrome_options.add_argument('--window-size=1920,1080')
+        Args:
+            query: Search query string
+            limit: Number of videos to find
+            
+        Returns:
+            List of video data dictionaries
+        """
+        videos = []
+        page = 1
         
-        # Additional stability options for macOS
-        chrome_options.add_argument('--disable-extensions')
-        chrome_options.add_argument('--disable-plugins')
-        chrome_options.add_argument('--disable-images')  # Speed up loading
-        chrome_options.add_argument('--single-process')
-        chrome_options.add_argument('--disable-background-timer-throttling')
-        chrome_options.add_argument('--disable-renderer-backgrounding')
-        chrome_options.add_argument('--disable-backgrounding-occluded-windows')
-        
-        # User agent
-        chrome_options.add_argument('--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36')
-        
-        try:
-            service = Service(ChromeDriverManager().install())
-            driver = webdriver.Chrome(service=service, options=chrome_options)
-            driver.set_page_load_timeout(30)
-            driver.implicitly_wait(10)
-            return driver
-        except Exception as e:
-            print(f"Error setting up Chrome driver: {str(e)}")
-            raise
-        
-    def search_videos_simple(self, query, max_results=20):
-        """Simplified search approach using requests for more reliable scraping"""
-        print(f"Searching Adobe Stock for: '{query}' (simplified method)")
-        
-        try:
-            # Corrected search URL for videos only - use the working pattern from URL finder
-            search_url = f"https://stock.adobe.com/search?k={query.replace(' ', '+')}&filters%5Bcontent_type%3Avideo%5D=1&order=relevance"
-            print(f"Fetching: {search_url}")
+        while len(videos) < limit:
+            self.logger.info(f"Searching page {page} for query: '{query}'")
             
-            response = self.session.get(search_url)
-            response.raise_for_status()
+            # Try different Adobe Stock URL patterns
+            search_urls = [
+                "https://stock.adobe.com/search/videos",
+                "https://stock.adobe.com/search",
+            ]
             
-            soup = BeautifulSoup(response.content, 'html.parser')
+            params = {
+                'k': query,
+                'content_type:video': '1',
+                'order': 'relevance',
+                'safe_search': '1',
+            }
             
-            # Look for video links and information in the HTML
-            video_links = soup.find_all('a', href=True)
-            video_data = []
-            
-            for link in video_links:
-                href = link.get('href', '')
-                # Look for video URLs - they can be in /video/ or /search/ with video content
-                if ('/video/' in href or ('/images/' in href and 'video' in href.lower())) and href not in [v.get('detail_url') for v in video_data]:
-                    # Extract video ID from different patterns
-                    video_id = None
-                    
-                    # Pattern 1: /video/something/id
-                    match = re.search(r'/video/[^/]+/(\d+)', href)
-                    if match:
-                        video_id = match.group(1)
-                    
-                    # Pattern 2: /images/something/id (for videos that show as images)
-                    if not video_id:
-                        match = re.search(r'/images/[^/]+/(\d+)', href)
-                        if match:
-                            video_id = match.group(1)
-                    
-                    if video_id:
-                        # Get title from surrounding elements
-                        title = "Video"
-                        title_elem = link.find('span') or link.find_parent().find('span')
-                        if title_elem:
-                            title = title_elem.get_text(strip=True)[:100]
-                        
-                        # Alternative way to find title from alt attribute
-                        img_elem = link.find('img')
-                        if img_elem and img_elem.get('alt') and not title_elem:
-                            title = img_elem.get('alt')[:100]
-                        
-                        video_info = {
-                            'id': video_id,
-                            'title': title or f"Video_{video_id}",
-                            'detail_url': f"https://stock.adobe.com{href}" if href.startswith('/') else href
-                        }
-                        
-                        video_data.append(video_info)
-                        print(f"Found video: {video_info['title']}")
-                        
-                        if len(video_data) >= max_results:
-                            break
-            
-            print(f"Successfully found {len(video_data)} videos using simple method")
-            return video_data
-            
-        except Exception as e:
-            print(f"Error in simplified search: {str(e)}")
-            return []
-        
-    def search_videos(self, query, max_results=20):
-        """Search for videos on Adobe Stock with fallback methods"""
-        print(f"Searching Adobe Stock for: '{query}'")
-        
-        # Try simple method first
-        video_data = self.search_videos_simple(query, max_results)
-        if video_data:
-            return video_data
-        
-        # Fallback to Selenium if simple method fails
-        print("Falling back to Selenium method...")
-        driver = None
-        
-        try:
-            driver = self.setup_driver()
-            
-            # Correct search URL for videos
-            search_url = f"https://stock.adobe.com/search?k={query}&filters%5Bcontent_type%3Avideo%5D=1&order=relevance"
-            
-            print(f"Navigating to: {search_url}")
-            driver.get(search_url)
-            
-            # Wait a bit for page to load
-            time.sleep(5)
-            
-            # Parse the page source
-            soup = BeautifulSoup(driver.page_source, 'html.parser')
-            
-            # Find video containers using the discovered structure
-            video_containers = soup.find_all('div', class_='js-search-result-cell')
-            
-            print(f"Found {len(video_containers)} video containers")
-            
-            for i, container in enumerate(video_containers[:max_results]):
+            page_videos = []
+            for url in search_urls:
                 try:
-                    video_info = self._extract_video_info(container)
-                    if video_info and '/video/' in video_info.get('detail_url', ''):
-                        video_data.append(video_info)
-                        print(f"Extracted info for video {i+1}: {video_info['title'][:50]}...")
-                except Exception as e:
-                    print(f"Error extracting video {i+1}: {str(e)}")
-                    continue
+                    response = self.session.get(url, params=params, timeout=30)
+                    response.raise_for_status()
                     
-        except Exception as e:
-            print(f"Error during Selenium search: {str(e)}")
-        finally:
-            if driver:
-                driver.quit()
+                    self.logger.info(f"Got response from {url}, status: {response.status_code}")
+                    
+                    # Look for JSON data in the page
+                    page_videos = self._extract_video_data(response.text)
+                    
+                    if page_videos:
+                        self.logger.info(f"Found {len(page_videos)} videos using {url}")
+                        break
+                    else:
+                        self.logger.warning(f"No videos found using {url}")
+                        
+                except requests.RequestException as e:
+                    self.logger.error(f"Error with {url}: {e}")
+                    continue
             
-        print(f"Successfully extracted {len(video_data)} videos")
-        return video_data
-    
-    def _scroll_page(self, driver, max_results):
-        """Scroll the page to load more results"""
-        last_height = driver.execute_script("return document.body.scrollHeight")
-        results_loaded = 0
-        
-        while results_loaded < max_results:
-            # Scroll down
-            driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-            time.sleep(2)
-            
-            # Check if new content loaded
-            new_height = driver.execute_script("return document.body.scrollHeight")
-            current_results = len(driver.find_elements(By.CSS_SELECTOR, "[data-testid='asset-grid-item']"))
-            
-            if new_height == last_height or current_results >= max_results:
+            if not page_videos:
+                self.logger.warning(f"No videos found on page {page}")
                 break
-                
-            last_height = new_height
-            results_loaded = current_results
-    
-    def _extract_video_info(self, container):
-        """Extract video information from container element"""
-        video_info = {}
+            
+            videos.extend(page_videos)
+            self.logger.info(f"Found {len(page_videos)} videos on page {page}")
+            
+            page += 1
+            time.sleep(self.delay)  # Rate limiting
         
-        # Extract content ID from data attribute
-        content_id = container.get('data-content-id')
-        if content_id:
-            video_info['id'] = content_id
+        return videos[:limit]
+
+    def _extract_video_data(self, html_content: str) -> List[Dict]:
+        """
+        Extract video data from Adobe Stock page HTML.
         
-        # Extract title from meta tag or img alt attribute
-        title = "Untitled Video"
-        meta_title = container.find('meta', {'itemprop': 'name'})
-        if meta_title:
-            title = meta_title.get('content', title)
-        else:
-            # Try img alt
-            img_elem = container.find('img')
-            if img_elem and img_elem.get('alt'):
-                title = img_elem.get('alt')
+        Args:
+            html_content: HTML content of the page
+            
+        Returns:
+            List of video data dictionaries
+        """
+        videos = []
         
-        video_info['title'] = title
-        
-        # Extract video URL from link
-        link_elem = container.find('a', class_='js-search-result-thumbnail')
-        if link_elem and link_elem.get('href'):
-            href = link_elem['href']
-            video_info['detail_url'] = f"https://stock.adobe.com{href}" if href.startswith('/') else href
-        
-        # Extract preview image
-        img_elem = container.find('img')
-        if img_elem and img_elem.get('src'):
-            video_info['preview_image'] = img_elem['src']
-        
-        return video_info if video_info.get('id') else None
-    
-    def get_video_download_info(self, video_id):
-        """Get detailed video information and download URLs using requests first"""
-        
-        # For Adobe Stock, we need to construct the correct video detail URL
-        # Try different possible URL patterns
-        possible_urls = [
-            f"https://stock.adobe.com/video/detail/{video_id}",
-            f"https://stock.adobe.com/video/{video_id}",
+        # Method 1: Look for various JSON data patterns
+        json_patterns = [
+            r'window\.__INITIAL_STATE__\s*=\s*({.*?});',
+            r'window\.INITIAL_STATE\s*=\s*({.*?});',
+            r'__APOLLO_STATE__["\']?\s*:\s*({.*?})',
+            r'window\.APOLLO_STATE\s*=\s*({.*?});',
+            r'"searchResults":\s*({.*?})',
         ]
         
-        for detail_url in possible_urls:
-            try:
-                print(f"Getting video details from: {detail_url}")
-                response = self.session.get(detail_url)
-                response.raise_for_status()
-                
-                soup = BeautifulSoup(response.content, 'html.parser')
-                download_info = {}
-                
-                # Look for video elements in the HTML
-                video_elements = soup.find_all('video')
-                for video_elem in video_elements:
-                    src = video_elem.get('src')
-                    if src:
-                        download_info['preview_url'] = src
+        for pattern in json_patterns:
+            json_match = re.search(pattern, html_content, re.DOTALL)
+            if json_match:
+                try:
+                    data = json.loads(json_match.group(1))
+                    extracted = self._parse_json_data(data)
+                    if extracted:
+                        videos.extend(extracted)
+                        self.logger.info(f"Extracted {len(extracted)} videos from JSON pattern")
                         break
-                        
-                    # Check for source elements
-                    sources = video_elem.find_all('source')
-                    for source in sources:
-                        src = source.get('src')
-                        if src:
-                            download_info['preview_url'] = src
-                            break
-                
-                # Look for title
-                title_elem = soup.find('h1') or soup.find('title')
-                if title_elem:
-                    download_info['title'] = title_elem.get_text(strip=True)
-                
-                # If we found something, return it
-                if download_info:
-                    return download_info
-                
-            except Exception as e:
-                print(f"Error getting video details from {detail_url}: {str(e)}")
-                continue
+                except json.JSONDecodeError as e:
+                    self.logger.debug(f"Error parsing JSON with pattern: {e}")
+                    continue
         
-        # If no video found with requests, try Selenium as fallback
-        print("No video URL found with requests, trying Selenium...")
-        return self._get_video_details_selenium(video_id)
-    
-    def _get_video_details_selenium(self, video_id):
-        """Fallback method using Selenium to get video details"""
-        possible_urls = [
-            f"https://stock.adobe.com/video/detail/{video_id}",
-            f"https://stock.adobe.com/video/{video_id}",
+        # Method 2: Use BeautifulSoup for HTML parsing
+        if not videos:
+            videos = self._extract_video_data_soup(html_content)
+        
+        # Method 3: Regex fallback for direct video URLs
+        if not videos:
+            videos = self._extract_video_data_regex(html_content)
+        
+        return videos
+
+    def _parse_json_data(self, data: dict) -> List[Dict]:
+        """Parse JSON data to extract video information."""
+        videos = []
+        
+        # Try different JSON structures
+        search_paths = [
+            ['search', 'results'],
+            ['searchResults'],
+            ['data', 'search', 'results'],
+            ['assets'],
+            ['items'],
         ]
         
-        driver = None
-        download_info = {}
+        for path in search_paths:
+            current = data
+            for key in path:
+                if isinstance(current, dict) and key in current:
+                    current = current[key]
+                else:
+                    current = None
+                    break
+            
+            if current:
+                if isinstance(current, dict):
+                    # Handle dict of items
+                    for item_id, item_data in current.items():
+                        video = self._extract_video_info(item_data, item_id)
+                        if video:
+                            videos.append(video)
+                elif isinstance(current, list):
+                    # Handle list of items
+                    for i, item_data in enumerate(current):
+                        video = self._extract_video_info(item_data, str(i))
+                        if video:
+                            videos.append(video)
+                
+                if videos:
+                    break
+        
+        return videos
+
+    def _extract_video_info(self, item_data: dict, item_id: str) -> Optional[Dict]:
+        """Extract video information from item data."""
+        if not isinstance(item_data, dict):
+            return None
+        
+        # Check if this is a video
+        asset_type = item_data.get('asset_type', '').lower()
+        content_type = item_data.get('content_type', '').lower()
+        media_type = item_data.get('media_type', '').lower()
+        
+        if not any(vid_type in [asset_type, content_type, media_type] for vid_type in ['video', 'videos', 'motion']):
+            return None
+        
+        # Extract URLs
+        preview_urls = []
+        comp_urls = []
+        
+        # Look for various URL patterns
+        url_fields = [
+            'video_preview_url', 'preview_url', 'comp_url', 'thumbnail_url',
+            'video_small_preview_url', 'video_preview_url_https',
+            'thumbnail_500_url', 'thumbnail_1000_url'
+        ]
+        
+        for field in url_fields:
+            url = item_data.get(field)
+            if url and isinstance(url, str):
+                if any(ext in url.lower() for ext in ['.mp4', '.mov', '.webm']):
+                    if 'preview' in field.lower():
+                        preview_urls.append(url)
+                    else:
+                        comp_urls.append(url)
+        
+        # If no video URLs found, skip
+        if not preview_urls and not comp_urls:
+            return None
+        
+        video_info = {
+            'id': item_id,
+            'title': item_data.get('title', item_data.get('name', f'Video_{item_id}')),
+            'thumbnail_url': item_data.get('thumbnail_500_url', item_data.get('thumbnail_url')),
+            'preview_url': preview_urls[0] if preview_urls else None,
+            'comp_url': comp_urls[0] if comp_urls else None,
+            'description': item_data.get('description', ''),
+            'tags': item_data.get('keywords', item_data.get('tags', []))
+        }
+        
+        return video_info
+
+    def _extract_video_data_soup(self, html_content: str) -> List[Dict]:
+        """
+        Use BeautifulSoup to extract video data from HTML.
+        
+        Args:
+            html_content: HTML content of the page
+            
+        Returns:
+            List of video data dictionaries
+        """
+        videos = []
         
         try:
-            driver = self.setup_driver()
+            soup = BeautifulSoup(html_content, 'html.parser')
             
-            for detail_url in possible_urls:
-                try:
-                    driver.get(detail_url)
-                    time.sleep(3)
-                    
-                    # Look for preview video elements
-                    video_elements = driver.find_elements(By.TAG_NAME, 'video')
-                    
-                    for video_elem in video_elements:
-                        src = video_elem.get_attribute('src')
-                        if src:
-                            download_info['preview_url'] = src
-                            break
-                            
-                        # Check for source elements within video
-                        sources = video_elem.find_elements(By.TAG_NAME, 'source')
-                        for source in sources:
-                            src = source.get_attribute('src')
-                            if src:
-                                download_info['preview_url'] = src
-                                break
-                    
-                    if download_info:
-                        break
-                        
-                except Exception as e:
-                    print(f"Error getting video details with Selenium from {detail_url}: {str(e)}")
-                    continue
+            # Look for video elements with data attributes
+            video_selectors = [
+                '[data-video-preview-url]',
+                '[data-comp-url]',
+                '.js-glyph-video',
+                '.video-thumbnail',
+                '[data-asset-type="Videos"]',
+                'video',
+                '.search-result[data-asset-type*="video" i]'
+            ]
+            
+            for selector in video_selectors:
+                elements = soup.select(selector)
+                for i, element in enumerate(elements):
+                    video_data = self._extract_element_data(element, f"soup_{selector}_{i}")
+                    if video_data:
+                        videos.append(video_data)
+            
+            if videos:
+                self.logger.info(f"BeautifulSoup found {len(videos)} videos")
             
         except Exception as e:
-            print(f"Error with Selenium video details: {str(e)}")
-        finally:
-            if driver:
-                driver.quit()
-                
-        return download_info
-    
-    def download_video(self, video_info, filename=None):
-        """Download a video file"""
+            self.logger.error(f"Error in BeautifulSoup parsing: {e}")
+        
+        return videos[:20]  # Limit results
+
+    def _extract_element_data(self, element, element_id: str) -> Optional[Dict]:
+        """Extract video data from a BeautifulSoup element."""
+        # Get all data attributes
+        attrs = element.attrs
+        
+        # Look for video URLs
+        preview_url = None
+        comp_url = None
+        
+        url_attrs = [
+            'data-video-preview-url', 'data-comp-url', 'data-preview-url',
+            'data-video-url', 'src', 'data-src'
+        ]
+        
+        for attr in url_attrs:
+            url = attrs.get(attr)
+            if url and any(ext in url.lower() for ext in ['.mp4', '.mov', '.webm']):
+                if 'preview' in attr.lower():
+                    preview_url = url
+                else:
+                    comp_url = url
+                break
+        
+        if not preview_url and not comp_url:
+            return None
+        
+        # Extract title
+        title = (attrs.get('data-title') or 
+                attrs.get('alt') or 
+                attrs.get('title') or 
+                element.get_text(strip=True) or 
+                f"Video_{element_id}")
+        
+        return {
+            'id': element_id,
+            'title': title[:100],  # Limit title length
+            'thumbnail_url': attrs.get('data-thumbnail-url'),
+            'preview_url': preview_url,
+            'comp_url': comp_url,
+            'description': attrs.get('data-description', ''),
+            'tags': []
+        }
+
+    def _extract_video_data_regex(self, html_content: str) -> List[Dict]:
+        """
+        Fallback method to extract video data using regex patterns.
+        
+        Args:
+            html_content: HTML content of the page
+            
+        Returns:
+            List of video data dictionaries
+        """
+        videos = []
+        
+        # Look for video URLs in various formats
+        video_patterns = [
+            r'https://[^"\s]*adobe[^"\s]*\.mp4',
+            r'https://[^"\s]*stock\.adobe\.com[^"\s]*\.(mp4|mov|webm)',
+            r'data-video-preview-url="([^"]+)"',
+            r'data-comp-url="([^"]+)"',
+            r'"video_preview_url":\s*"([^"]+)"',
+            r'"comp_url":\s*"([^"]+)"',
+        ]
+        
+        for i, pattern in enumerate(video_patterns):
+            matches = re.findall(pattern, html_content, re.IGNORECASE)
+            for j, match in enumerate(matches):
+                url = match if isinstance(match, str) else match[0]
+                if url and any(ext in url.lower() for ext in ['.mp4', '.mov', '.webm']):
+                    video_info = {
+                        'id': f'regex_{i}_{j}',
+                        'title': f'Video_regex_{i}_{j}',
+                        'thumbnail_url': None,
+                        'preview_url': url if 'preview' in url.lower() else None,
+                        'comp_url': url if 'preview' not in url.lower() else None,
+                        'description': '',
+                        'tags': []
+                    }
+                    videos.append(video_info)
+        
+        if videos:
+            self.logger.info(f"Regex extraction found {len(videos)} videos")
+        
+        return videos[:20]  # Limit fallback results
+
+    def download_video(self, video_data: Dict, filename: Optional[str] = None) -> bool:
+        """
+        Download a video thumbnail.
+        
+        Args:
+            video_data: Video data dictionary
+            filename: Optional custom filename
+            
+        Returns:
+            True if download successful, False otherwise
+        """
+        # Determine the best URL to download
+        download_url = video_data.get('comp_url') or video_data.get('preview_url')
+        
+        if not download_url:
+            self.logger.warning(f"No download URL found for video {video_data['id']}")
+            return False
+        
+        # Create filename
         if not filename:
-            safe_title = sanitize_filename(video_info.get('title', 'video'))
-            filename = f"{safe_title}_{video_info.get('id', 'unknown')}.mp4"
+            safe_title = re.sub(r'[^\w\s-]', '', video_data['title'])
+            safe_title = re.sub(r'[-\s]+', '_', safe_title)
+            extension = '.mp4'
+            if download_url:
+                if '.mov' in download_url.lower():
+                    extension = '.mov'
+                elif '.webm' in download_url.lower():
+                    extension = '.webm'
+            filename = f"{video_data['id']}_{safe_title}{extension}"
         
         filepath = self.download_dir / filename
         
-        # Try preview video first, then preview image as fallback
-        download_url = video_info.get('preview_video') or video_info.get('preview_url') or video_info.get('preview_image')
-        
-        if not download_url:
-            print(f"No download URL found for {video_info.get('title', 'video')}")
-            return None
-        
-        # Determine file extension based on URL
-        if download_url.endswith('.jpg') or download_url.endswith('.jpeg') or download_url.endswith('.png'):
-            filename = filename.replace('.mp4', '.jpg')
-            filepath = self.download_dir / filename
+        # Skip if file already exists
+        if filepath.exists():
+            self.logger.info(f"File {filename} already exists, skipping...")
+            return True
         
         try:
-            print(f"Downloading: {filename}")
-            response = self.session.get(download_url, stream=True)
+            self.logger.info(f"Downloading {filename} from {download_url}")
+            
+            response = self.session.get(download_url, stream=True, timeout=60)
             response.raise_for_status()
             
-            total_size = int(response.headers.get('content-length', 0))
-            
             with open(filepath, 'wb') as f:
-                if total_size == 0:
-                    f.write(response.content)
-                else:
-                    with tqdm(total=total_size, unit='iB', unit_scale=True, desc=filename) as pbar:
-                        for chunk in response.iter_content(chunk_size=8192):
-                            if chunk:
-                                f.write(chunk)
-                                pbar.update(len(chunk))
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
             
-            print(f"Successfully downloaded: {filepath}")
-            return str(filepath)
+            self.logger.info(f"Successfully downloaded {filename}")
+            return True
             
-        except Exception as e:
-            print(f"Error downloading {filename}: {str(e)}")
+        except requests.RequestException as e:
+            self.logger.error(f"Error downloading {filename}: {e}")
             if filepath.exists():
-                filepath.unlink()
-            return None
+                filepath.unlink()  # Remove partial file
+            return False
+
+    def scrape_and_download(self, query: str, count: int = 10) -> int:
+        """
+        Search for videos and download them.
+        
+        Args:
+            query: Search query string
+            count: Number of videos to download
+            
+        Returns:
+            Number of successfully downloaded videos
+        """
+        self.logger.info(f"Starting scrape for query: '{query}', count: {count}")
+        
+        # Search for videos
+        videos = self.search_videos(query, count)
+        
+        if not videos:
+            self.logger.warning("No videos found for the given query")
+            return 0
+        
+        self.logger.info(f"Found {len(videos)} videos to download")
+        
+        # Download videos
+        successful_downloads = 0
+        
+        for i, video in enumerate(videos, 1):
+            self.logger.info(f"Processing video {i}/{len(videos)}: {video['title']}")
+            
+            if self.download_video(video):
+                successful_downloads += 1
+            
+            # Rate limiting between downloads
+            if i < len(videos):
+                time.sleep(self.delay)
+        
+        self.logger.info(f"Download complete. {successful_downloads}/{len(videos)} videos downloaded successfully")
+        return successful_downloads
+
+
+def main():
+    parser = argparse.ArgumentParser(description='Adobe Stock Video Thumbnail Scraper')
+    parser.add_argument('--query', '-q', required=True, help='Search query for videos')
+    parser.add_argument('--count', '-c', type=int, default=10, help='Number of videos to download (default: 10)')
+    parser.add_argument('--output', '-o', default='downloads', help='Output directory (default: downloads)')
+    parser.add_argument('--delay', '-d', type=float, default=1.0, help='Delay between requests in seconds (default: 1.0)')
     
-    def scrape_and_download(self, query, max_videos=5):
-        """Complete pipeline: search, extract, and download videos"""
-        print(f"Starting Adobe Stock video scraping pipeline for: '{query}'")
+    args = parser.parse_args()
+    
+    # Create scraper instance
+    scraper = AdobeStockScraper(download_dir=args.output, delay=args.delay)
+    
+    # Run scraping
+    try:
+        downloaded_count = scraper.scrape_and_download(args.query, args.count)
+        print(f"\nScraping completed! Downloaded {downloaded_count} videos to '{args.output}' directory.")
         
-        # Create query-specific directory
-        query_dir = self.download_dir / sanitize_filename(query)
-        query_dir.mkdir(exist_ok=True)
-        
-        # Update download directory
-        original_dir = self.download_dir
-        self.download_dir = query_dir
-        
-        try:
-            # Search for videos
-            videos = self.search_videos(query, max_videos * 2)  # Get more to account for failures
-            
-            if not videos:
-                print("No videos found!")
-                return []
-            
-            downloaded_files = []
-            successful_downloads = 0
-            
-            for i, video in enumerate(videos):
-                if successful_downloads >= max_videos:
-                    break
-                    
-                print(f"\nProcessing video {i+1}/{len(videos)}")
-                
-                # Get detailed video info
-                if video.get('id'):
-                    detailed_info = self.get_video_download_info(video['id'])
-                    video.update(detailed_info)
-                
-                # Download the video
-                downloaded_file = self.download_video(video)
-                if downloaded_file:
-                    downloaded_files.append(downloaded_file)
-                    successful_downloads += 1
-                
-                # Add delay between downloads
-                time.sleep(1)
-            
-            # Save metadata
-            metadata_file = query_dir / 'metadata.json'
-            with open(metadata_file, 'w') as f:
-                json.dump({
-                    'query': query,
-                    'total_found': len(videos),
-                    'downloaded': len(downloaded_files),
-                    'videos': videos[:len(downloaded_files)]
-                }, f, indent=2)
-            
-            print(f"\n✅ Pipeline completed!")
-            print(f"📁 Downloaded {len(downloaded_files)} videos to: {query_dir}")
-            print(f"📄 Metadata saved to: {metadata_file}")
-            
-            return downloaded_files
-            
-        finally:
-            self.download_dir = original_dir
+    except KeyboardInterrupt:
+        print("\nScraping interrupted by user.")
+    except Exception as e:
+        print(f"An error occurred: {e}")
 
 
 if __name__ == "__main__":
-    # Example usage
-    scraper = AdobeStockVideoScraper()
-    query = input("Enter search query: ")
-    max_videos = int(input("Max videos to download (default 5): ") or 5)
-    
-    downloaded = scraper.scrape_and_download(query, max_videos)
-    print(f"\nDownloaded {len(downloaded)} videos:")
-    for file in downloaded:
-        print(f"  - {file}") 
+    main() 
