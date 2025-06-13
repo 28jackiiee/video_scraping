@@ -72,9 +72,8 @@ class AdobeStockScraper:
         while len(videos) < limit and page <= max_pages and consecutive_empty_pages < 3:
             self.logger.info(f"Searching page {page} for query: '{query}'")
             
-            # Try different Adobe Stock URL patterns
+            # Use only the working Adobe Stock URL pattern
             search_urls = [
-                "https://stock.adobe.com/search/videos",
                 "https://stock.adobe.com/search",
             ]
             

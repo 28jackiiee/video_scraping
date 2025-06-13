@@ -1,0 +1,12 @@
+{
+  "original_query": "nature landscapes",
+  "clean_query": "nature_landscapes",
+  "created_at": "2025-06-12 21:25:05",
+  "last_updated": "2025-06-12 21:34:05",
+  "total_videos_downloaded": 8,
+  "last_download_session": {
+    "requested_count": 10,
+    "new_downloads": 4,
+    "session_timestamp": "2025-06-12 21:34:05"
+  }
+}
