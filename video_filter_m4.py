@@ -162,7 +162,7 @@ class M4VideoFilter:
             print(f"⚠️  Warning: Could not load metadata from {metadata_file}: {e}")
             return {}
     
-    def filter_videos(self, source_dir: Path, query: str = None, top_k: int = 5) -> List[Tuple[Path, float]]:
+    def filter_videos(self, source_dir: Path, query: str = None, top_k: int = 5) -> List[Tuple[Path, float, str]]:
         """Filter videos by similarity to query text."""
         print(f"\n🔍 Filtering videos in: {source_dir}")
         
@@ -212,7 +212,7 @@ class M4VideoFilter:
                 # Calculate similarity
                 similarity = self.calculate_similarity(video_embedding, text_embedding)
                 
-                video_results.append((video_file, similarity))
+                video_results.append((video_file, similarity, search_query))
                 print(f"📊 Similarity score: {similarity:.4f}")
         
         # Sort by similarity (highest first)
@@ -221,49 +221,113 @@ class M4VideoFilter:
         # Return top_k results
         return video_results[:top_k]
     
-    def copy_filtered_videos(self, filtered_videos: List[Tuple[Path, float]], output_dir: Path):
-        """Copy filtered videos to output directory."""
+    def clean_query_for_folder(self, query: str) -> str:
+        """Clean query text to make it safe for folder names."""
+        import re
+        
+        # Remove or replace problematic characters
+        cleaned = re.sub(r'[<>:"/\\|?*]', '_', query)  # Replace filesystem-unsafe chars
+        cleaned = re.sub(r'\s+', '_', cleaned)  # Replace spaces with underscores
+        cleaned = re.sub(r'_+', '_', cleaned)  # Replace multiple underscores with single
+        cleaned = cleaned.strip('_')  # Remove leading/trailing underscores
+        
+        # Limit length to avoid filesystem issues
+        if len(cleaned) > 50:
+            cleaned = cleaned[:50].rstrip('_')
+        
+        return cleaned or "unknown_query"
+    
+    def copy_filtered_videos(self, filtered_videos: List[Tuple[Path, float, str]], output_dir: Path):
+        """Copy filtered videos to output directory organized by query."""
         output_dir.mkdir(parents=True, exist_ok=True)
         
         print(f"\n📋 Copying {len(filtered_videos)} videos to: {output_dir}")
         
-        # Create a results file with similarity scores
-        results_data = {
+        # Group videos by query
+        query_groups = {}
+        for video_path, similarity, query in filtered_videos:
+            if query not in query_groups:
+                query_groups[query] = []
+            query_groups[query].append((video_path, similarity))
+        
+        # Create a summary results file for the main directory
+        summary_data = {
             "filtering_timestamp": str(Path().absolute()),
             "total_videos_filtered": len(filtered_videos),
             "device_used": self.device,
-            "videos": []
+            "total_queries": len(query_groups),
+            "query_summary": []
         }
         
-        for i, (video_path, similarity) in enumerate(filtered_videos, 1):
-            # Create new filename with rank and similarity
-            original_name = video_path.stem
-            extension = video_path.suffix
-            new_name = f"rank_{i:02d}_sim_{similarity:.4f}_{original_name}{extension}"
+        # Process each query group
+        for query, videos in query_groups.items():
+            # Create query-specific subdirectory
+            query_folder_name = self.clean_query_for_folder(query)
+            query_output_dir = output_dir / query_folder_name
+            query_output_dir.mkdir(parents=True, exist_ok=True)
             
-            output_path = output_dir / new_name
+            print(f"\n📁 Creating folder for query: '{query}' -> {query_folder_name}")
             
-            try:
-                shutil.copy2(video_path, output_path)
-                print(f"  ✅ Copied: {new_name}")
+            # Create query-specific results data
+            query_results = {
+                "filtering_timestamp": str(Path().absolute()),
+                "original_query": query,
+                "folder_name": query_folder_name,
+                "device_used": self.device,
+                "total_videos_in_query": len(videos),
+                "videos": []
+            }
+            
+            # Sort videos in this query group by similarity
+            videos.sort(key=lambda x: x[1], reverse=True)
+            
+            for i, (video_path, similarity) in enumerate(videos, 1):
+                # Create new filename with rank and similarity
+                original_name = video_path.stem
+                extension = video_path.suffix
+                new_name = f"rank_{i:02d}_sim_{similarity:.4f}_{original_name}{extension}"
                 
-                results_data["videos"].append({
-                    "rank": i,
-                    "original_path": str(video_path),
-                    "output_filename": new_name,
-                    "similarity_score": similarity,
-                    "source_directory": video_path.parent.name
-                })
+                output_path = query_output_dir / new_name
                 
-            except Exception as e:
-                print(f"  ❌ Failed to copy {video_path.name}: {e}")
+                try:
+                    shutil.copy2(video_path, output_path)
+                    print(f"  ✅ Copied: {new_name}")
+                    
+                    query_results["videos"].append({
+                        "rank": i,
+                        "original_path": str(video_path),
+                        "output_filename": new_name,
+                        "similarity_score": similarity,
+                        "source_directory": video_path.parent.name
+                    })
+                    
+                except Exception as e:
+                    print(f"  ❌ Failed to copy {video_path.name}: {e}")
+            
+            # Save query-specific results file in the query folder
+            query_results_file = query_output_dir / "filtering_results.json"
+            with open(query_results_file, 'w', encoding='utf-8') as f:
+                json.dump(query_results, f, indent=2, ensure_ascii=False)
+            
+            print(f"  📊 Query results saved to: {query_results_file}")
+            
+            # Add to summary
+            summary_data["query_summary"].append({
+                "query": query,
+                "folder_name": query_folder_name,
+                "video_count": len(videos),
+                "top_similarity": max(similarity for _, similarity in videos) if videos else 0.0,
+                "avg_similarity": sum(similarity for _, similarity in videos) / len(videos) if videos else 0.0
+            })
         
-        # Save results metadata
-        results_file = output_dir / "filtering_results.json"
-        with open(results_file, 'w', encoding='utf-8') as f:
-            json.dump(results_data, f, indent=2, ensure_ascii=False)
+        # Save summary results file in the main filtered directory
+        summary_file = output_dir / "filtering_summary.json"
+        with open(summary_file, 'w', encoding='utf-8') as f:
+            json.dump(summary_data, f, indent=2, ensure_ascii=False)
         
-        print(f"📊 Results saved to: {results_file}")
+        print(f"\n📊 Summary saved to: {summary_file}")
+        print(f"📁 Videos organized into {len(query_groups)} query-based folders")
+        print(f"📋 Each folder contains its own filtering_results.json file")
 
 
 def main():
@@ -332,7 +396,7 @@ def main():
     
     # Display summary
     print("\n📊 Top Results:")
-    for i, (video_path, similarity) in enumerate(filtered_videos, 1):
+    for i, (video_path, similarity, query) in enumerate(filtered_videos, 1):
         print(f"  {i}. {video_path.name} (similarity: {similarity:.4f})")
 
 

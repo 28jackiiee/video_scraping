@@ -1,12 +1,12 @@
 # Adobe Stock Scraper - Authentication Guide
 
-## 🔐 Browser-Based Authentication
+## 🔐 Authentication Required by Default
 
-The Adobe Stock scraper now supports browser-based authentication to download watermarked videos from Adobe Stock.
+The Adobe Stock scraper now **requires authentication by default** to download watermarked videos from Adobe Stock. This ensures reliable access to videos.
 
 ## 📋 Prerequisites
 
-Before using authentication, make sure you have:
+Before using the scraper, make sure you have:
 
 1. **Chrome Browser** - Required for Selenium automation
 2. **ChromeDriver** - Install with: `brew install chromedriver` (macOS)
@@ -15,24 +15,30 @@ Before using authentication, make sure you have:
 
 ## 🚀 Usage Examples
 
-### 1. Basic Authenticated Scraping
+### 1. Basic Scraping (Authentication Required)
 ```bash
-python adobe_stock_scraper.py --query "ocean waves" --count 5 --login
+python adobe_stock_scraper.py --query "ocean waves" --count 5
 ```
 
-### 2. Large Download with Authentication
+### 2. Large Download with Custom Directory
 ```bash
-python adobe_stock_scraper.py --query "business meeting" --count 20 --login --output my_videos
+python adobe_stock_scraper.py --query "business meeting" --count 20 --output my_videos
 ```
 
 ### 3. Custom Rate Limiting
 ```bash
-python adobe_stock_scraper.py --query "nature landscape" --count 10 --login --delay 2.0
+python adobe_stock_scraper.py --query "nature landscape" --count 10 --delay 2.0
 ```
+
+### 4. Skip Authentication (Not Recommended)
+```bash
+python adobe_stock_scraper.py --query "test" --count 2 --no-login
+```
+⚠️ **Warning**: Using `--no-login` will likely result in 401 Unauthorized errors.
 
 ## 🔄 Authentication Flow
 
-When you use the `--login` flag, here's what happens:
+**By default, every run includes authentication:**
 
 1. **Browser Opens**: Chrome browser opens automatically
 2. **Manual Login**: You log in to Adobe Stock manually in the browser
@@ -44,13 +50,18 @@ When you use the `--login` flag, here's what happens:
 
 ### First Time Setup
 
-1. **Run the command with `--login` flag:**
+1. **Run any command (authentication happens automatically):**
    ```bash
-   python adobe_stock_scraper.py --query "your search" --count 5 --login
+   python adobe_stock_scraper.py --query "your search" --count 5
    ```
 
-2. **Browser will open automatically** - You'll see this message:
+2. **Browser opens automatically** - You'll see this message:
    ```
+   🔐 AUTHENTICATION MODE (DEFAULT)
+   You will be prompted to log in through your browser.
+   Make sure you have Chrome installed and chromedriver available.
+   Use --no-login to skip authentication (may result in 401 errors).
+   
    🌐 BROWSER OPENED FOR ADOBE STOCK LOGIN
    ========================================
    1. Complete your login in the browser window
@@ -81,6 +92,12 @@ After the first authentication, cookies are saved to `adobe_stock_cookies.json`.
 - Check if they're still valid
 - Re-authenticate only if needed
 
+**Every command runs with authentication by default:**
+```bash
+python adobe_stock_scraper.py --query "mountains" --count 8
+python adobe_stock_scraper.py --query "technology" --count 15
+```
+
 ## 📁 File Organization
 
 Downloads are organized as follows:
@@ -103,9 +120,9 @@ downloads/
 |--------|-------------|---------|
 | `--query` | Search terms (required) | `--query "nature landscape"` |
 | `--count` | Number of videos | `--count 10` |
-| `--login` | Enable authentication | `--login` |
 | `--output` | Output directory | `--output my_videos` |
 | `--delay` | Delay between requests | `--delay 2.0` |
+| `--no-login` | **Skip authentication** (not recommended) | `--no-login` |
 
 ## 🛠️ Troubleshooting
 
@@ -128,8 +145,9 @@ brew install chromedriver
 
 **3. "401 Unauthorized errors"**
 - Your session may have expired
-- Run with `--login` again to re-authenticate
+- Delete `adobe_stock_cookies.json` and run again to re-authenticate
 - Make sure your Adobe Stock account has proper permissions
+- **Remove `--no-login` flag** if you were using it
 
 **4. "Browser won't open"**
 - Make sure Chrome is installed
@@ -146,14 +164,21 @@ rm adobe_stock_cookies.json
 
 **Authentication Successful:**
 ```
+🔐 AUTHENTICATION MODE (DEFAULT)
 ✅ Authentication successful! You can now close the browser.
-🔐 AUTHENTICATION MODE ENABLED
 ✅ Scraping completed! Downloaded 5 videos to 'downloads/ocean_waves' directory.
 ```
 
 **Authentication Failed:**
 ```
 ❌ No videos were downloaded. Check authentication or try different search terms.
+```
+
+**No Login Mode (Not Recommended):**
+```
+⚠️  NO AUTHENTICATION MODE
+Attempting to download without login - this may result in 401 errors.
+Remove --no-login flag to use authentication (recommended).
 ```
 
 ## 🔒 Security Notes
@@ -165,11 +190,13 @@ rm adobe_stock_cookies.json
 
 ## 💡 Tips
 
-1. **Test with small counts first** (`--count 2`)
-2. **Use specific search terms** for better results
-3. **Check Adobe Stock manually first** to verify your account works
-4. **Use rate limiting** (`--delay 2.0`) to avoid being blocked
-5. **Keep browser window visible** during authentication
+1. **Authentication is automatic** - no need to add flags
+2. **Test with small counts first** (`--count 2`)
+3. **Use specific search terms** for better results
+4. **Check Adobe Stock manually first** to verify your account works
+5. **Use rate limiting** (`--delay 2.0`) to avoid being blocked
+6. **Keep browser window visible** during authentication
+7. **Avoid `--no-login`** unless testing
 
 ## 🆘 Support
 
@@ -178,4 +205,5 @@ If you encounter issues:
 2. Verify prerequisites are installed
 3. Test Adobe Stock access manually in browser
 4. Try deleting cookies and re-authenticating
-5. Use smaller `--count` values for testing 
+5. Use smaller `--count` values for testing
+6. **Make sure you're not using `--no-login`** flag 

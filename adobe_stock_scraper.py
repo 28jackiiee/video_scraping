@@ -3,10 +3,11 @@
 Adobe Stock Video Thumbnail Scraper
 
 This script scrapes and downloads thumbnail videos from Adobe Stock
-based on a search query. Supports browser-based authentication.
+based on a search query. Authentication is required by default.
 
 Usage:
-    python adobe_stock_scraper.py --query "nature landscape" --count 10 --login
+    python adobe_stock_scraper.py --query "nature landscape" --count 10
+    python adobe_stock_scraper.py --query "ocean waves" --count 5 --no-login
 """
 
 import requests
@@ -37,14 +38,14 @@ except ImportError:
     print("Browser authentication will not be available.")
 
 class AdobeStockScraper:
-    def __init__(self, download_dir: str = "downloads", delay: float = 1.0, use_auth: bool = False):
+    def __init__(self, download_dir: str = "downloads", delay: float = 1.0, use_auth: bool = True):
         """
         Initialize the Adobe Stock scraper.
         
         Args:
             download_dir: Directory to save downloaded videos
             delay: Delay between requests in seconds
-            use_auth: Whether to use browser-based authentication
+            use_auth: Whether to use browser-based authentication (default: True)
         """
         self.download_dir = Path(download_dir)
         self.download_dir.mkdir(exist_ok=True)
@@ -932,17 +933,18 @@ class AdobeStockScraper:
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Adobe Stock Video Thumbnail Scraper')
+    parser = argparse.ArgumentParser(description='Adobe Stock Video Thumbnail Scraper (Authentication Required)')
     parser.add_argument('--query', '-q', required=True, help='Search query for videos')
     parser.add_argument('--count', '-c', type=int, default=10, help='Number of videos to download (default: 10)')
     parser.add_argument('--output', '-o', default='downloads', help='Output directory (default: downloads)')
     parser.add_argument('--delay', '-d', type=float, default=1.0, help='Delay between requests in seconds (default: 1.0)')
-    parser.add_argument('--login', action='store_true', help='Use browser-based authentication')
+    parser.add_argument('--no-login', action='store_true', help='Skip browser-based authentication (may result in 401 errors)')
     
     args = parser.parse_args()
     
-    # Create scraper instance
-    scraper = AdobeStockScraper(download_dir=args.output, delay=args.delay, use_auth=args.login)
+    # Create scraper instance (authentication enabled by default)
+    use_auth = not args.no_login  # Reverse the logic - auth is default, --no-login disables it
+    scraper = AdobeStockScraper(download_dir=args.output, delay=args.delay, use_auth=use_auth)
     
     # Create clean query name for the subdirectory
     clean_query = re.sub(r'[^\w\s-]', '', args.query)
@@ -951,10 +953,16 @@ def main():
     
     # Run scraping
     try:
-        if args.login:
-            print("\n🔐 AUTHENTICATION MODE ENABLED")
+        if use_auth:
+            print("\n🔐 AUTHENTICATION MODE (DEFAULT)")
             print("You will be prompted to log in through your browser.")
             print("Make sure you have Chrome installed and chromedriver available.")
+            print("Use --no-login to skip authentication (may result in 401 errors).")
+            print("")
+        else:
+            print("\n⚠️  NO AUTHENTICATION MODE")
+            print("Attempting to download without login - this may result in 401 errors.")
+            print("Remove --no-login flag to use authentication (recommended).")
             print("")
         
         downloaded_count = scraper.scrape_and_download(args.query, args.count)
@@ -963,7 +971,10 @@ def main():
         if downloaded_count > 0:
             print(f"\n✅ Scraping completed! Downloaded {downloaded_count} videos to '{query_dir}' directory.")
         else:
-            print(f"\n❌ No videos were downloaded. Check authentication or try different search terms.")
+            if use_auth:
+                print(f"\n❌ No videos were downloaded. Check authentication or try different search terms.")
+            else:
+                print(f"\n❌ No videos were downloaded. Try using authentication (remove --no-login flag).")
         
     except KeyboardInterrupt:
         print("\nScraping interrupted by user.")
