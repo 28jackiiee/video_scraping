@@ -355,33 +355,26 @@ class AdobeStockScraper:
         """
         videos = []
         
-        # Method 1: Extract video IDs from HTML to construct watermarked download URLs
-        video_ids = self._extract_video_ids_from_html(html_content)
-        if video_ids:
-            for video_id in video_ids:
-                video_data = {
-                    'id': video_id,
-                    'title': f'Adobe_Stock_Video_{video_id}',
-                    'thumbnail_url': None,
-                    'preview_url': f'https://stock.adobe.com/Download/Watermarked/{video_id}',
-                    'comp_url': f'https://stock.adobe.com/Download/Watermarked/{video_id}',
-                    'description': '',
-                    'tags': []
-                }
-                videos.append(video_data)
-            self.logger.info(f"Extracted {len(videos)} video IDs from HTML for watermarked downloads")
+        # Method 1: Look for video data in embedded JavaScript
+        videos_from_js = self._extract_videos_from_javascript(html_content)
+        if videos_from_js:
+            videos.extend(videos_from_js)
+            self.logger.info(f"Extracted {len(videos_from_js)} videos from JavaScript data")
             return videos
         
         # Method 2: Look for various JSON data patterns (fallback)
         json_patterns = [
-            r'window\.__INITIAL_STATE__\s*=\s*({.*?});',
-            r'window\.INITIAL_STATE\s*=\s*({.*?});',
-            r'__APOLLO_STATE__["\']?\s*:\s*({.*?})',
-            r'window\.APOLLO_STATE\s*=\s*({.*?});',
-            r'"searchResults":\s*({.*?})',
+            (r'window\.__INITIAL_STATE__\s*=\s*({.*?});', 'INITIAL_STATE'),
+            (r'window\.INITIAL_STATE\s*=\s*({.*?});', 'INITIAL_STATE_alt'),
+            (r'__APOLLO_STATE__["\']?\s*:\s*({.*?})', 'APOLLO_STATE'),
+            (r'window\.APOLLO_STATE\s*=\s*({.*?});', 'APOLLO_STATE_alt'),
+            (r'"searchResults":\s*({.*?})', 'searchResults'),
+            (r'"assets":\s*(\[.*?\])', 'assets'),
+            (r'"videos":\s*(\[.*?\])', 'videos'),
+            (r'"results":\s*(\[.*?\])', 'results'),
         ]
         
-        for pattern in json_patterns:
+        for pattern, name in json_patterns:
             json_match = re.search(pattern, html_content, re.DOTALL)
             if json_match:
                 try:
@@ -389,21 +382,278 @@ class AdobeStockScraper:
                     extracted = self._parse_json_data(data)
                     if extracted:
                         videos.extend(extracted)
-                        self.logger.info(f"Extracted {len(extracted)} videos from JSON pattern")
+                        self.logger.info(f"Extracted {len(extracted)} videos from JSON pattern: {name}")
                         break
                 except json.JSONDecodeError as e:
-                    self.logger.debug(f"Error parsing JSON with pattern: {e}")
+                    self.logger.debug(f"Error parsing JSON with pattern {name}: {e}")
                     continue
         
-        # Method 3: Use BeautifulSoup for HTML parsing (fallback)
+        # Method 4: Use BeautifulSoup for HTML parsing (fallback)
         if not videos:
             videos = self._extract_video_data_soup(html_content)
         
-        # Method 4: Regex fallback for direct video URLs (fallback)
+        # Method 5: Regex fallback for direct video URLs (fallback)
         if not videos:
             videos = self._extract_video_data_regex(html_content)
         
         return videos
+
+    def _extract_videos_from_javascript(self, html_content: str) -> List[Dict]:
+        """
+        Extract video data from embedded JavaScript in Adobe Stock pages.
+        
+        Args:
+            html_content: HTML content of the page
+            
+        Returns:
+            List of video data dictionaries
+        """
+        videos = []
+        
+        # Look for the specific video data structure: "video_id":{"content_id":video_id,"title":"title"...}
+        # Pattern 1: More specific pattern for the video data
+        pattern1 = r'"(\d{8,})":\s*\{\s*"[^"]*":\s*"[^"]*",\s*"content_id":\s*\1[^}]*?"title":\s*"([^"]+)"[^}]*?"comp_file_path":\s*"([^"]+)"[^}]*?\}'
+        
+        matches = re.findall(pattern1, html_content, re.DOTALL)
+        
+        for video_id, title, comp_path in matches:
+            video_info = {
+                'id': video_id,
+                'title': title[:150],  # Limit title length
+                'thumbnail_url': None,
+                'preview_url': comp_path,
+                'comp_url': comp_path,
+                'description': '',
+                'tags': []
+            }
+            videos.append(video_info)
+        
+        # Pattern 2: Simpler pattern just looking for title associated with content_id
+        if not videos:
+            pattern2 = r'"content_id":\s*(\d{8,})[^}]*?"title":\s*"([^"]+)"[^}]*?"comp_file_path":\s*"([^"]+)"'
+            
+            matches = re.findall(pattern2, html_content, re.DOTALL)
+            
+            for video_id, title, comp_path in matches:
+                video_info = {
+                    'id': video_id,
+                    'title': title[:150],  # Limit title length
+                    'thumbnail_url': None,
+                    'preview_url': comp_path,
+                    'comp_url': comp_path,
+                    'description': '',
+                    'tags': []
+                }
+                videos.append(video_info)
+        
+        # Pattern 3: Even simpler - just find title near content_id
+        if not videos:
+            pattern3 = r'"content_id":\s*(\d{8,})[^}]{1,500}?"title":\s*"([^"]+)"'
+            
+            matches = re.findall(pattern3, html_content, re.DOTALL)
+            
+            for video_id, title in matches:
+                video_info = {
+                    'id': video_id,
+                    'title': title[:150],  # Limit title length
+                    'thumbnail_url': None,
+                    'preview_url': f'https://stock.adobe.com/Download/Watermarked/{video_id}',
+                    'comp_url': f'https://stock.adobe.com/Download/Watermarked/{video_id}',
+                    'description': '',
+                    'tags': []
+                }
+                videos.append(video_info)
+        
+        # Remove duplicates by video_id
+        seen_ids = set()
+        unique_videos = []
+        for video in videos:
+            if video['id'] not in seen_ids:
+                seen_ids.add(video['id'])
+                unique_videos.append(video)
+        
+        self.logger.info(f"Found {len(unique_videos)} unique videos from JavaScript parsing")
+        return unique_videos
+
+    def _extract_video_ids_and_titles_from_html(self, html_content: str) -> List[Dict]:
+        """
+        Extract Adobe Stock video IDs and their corresponding titles from HTML content.
+        
+        Args:
+            html_content: HTML content of the page
+            
+        Returns:
+            List of video data dictionaries with IDs and titles
+        """
+        videos = []
+        
+        try:
+            soup = BeautifulSoup(html_content, 'html.parser')
+            
+            # Look for various video container patterns in Adobe Stock
+            video_selectors = [
+                # Common Adobe Stock video result containers
+                '[data-asset-id]',
+                '.search-result',
+                '.asset-item',
+                '.thumbnail-container',
+                '.video-thumbnail',
+                '.js-glyph-video',
+                '[data-id]',
+                '.asset-card',
+                '.media-item'
+            ]
+            
+            seen_ids = set()
+            
+            for selector in video_selectors:
+                elements = soup.select(selector)
+                for element in elements:
+                    video_data = self._extract_video_data_from_element(element)
+                    if video_data and video_data['id'] not in seen_ids:
+                        seen_ids.add(video_data['id'])
+                        videos.append(video_data)
+            
+            # If we didn't find videos with the above selectors, try a more general approach
+            if not videos:
+                # Look for any elements with video-related data attributes
+                all_elements = soup.find_all(attrs={'data-asset-id': True})
+                all_elements.extend(soup.find_all(attrs={'data-id': True}))
+                
+                for element in all_elements:
+                    video_data = self._extract_video_data_from_element(element)
+                    if video_data and video_data['id'] not in seen_ids:
+                        seen_ids.add(video_data['id'])
+                        videos.append(video_data)
+            
+            self.logger.info(f"Found {len(videos)} unique videos with titles from HTML parsing")
+            
+        except Exception as e:
+            self.logger.error(f"Error in HTML parsing for video titles: {e}")
+            # Fallback to just IDs if title extraction fails
+            video_ids = self._extract_video_ids_from_html(html_content)
+            for video_id in video_ids:
+                videos.append({
+                    'id': video_id,
+                    'title': f'Adobe_Stock_Video_{video_id}',
+                    'thumbnail_url': None,
+                    'preview_url': f'https://stock.adobe.com/Download/Watermarked/{video_id}',
+                    'comp_url': f'https://stock.adobe.com/Download/Watermarked/{video_id}',
+                    'description': '',
+                    'tags': []
+                })
+        
+        return videos
+    
+    def _extract_video_data_from_element(self, element) -> Optional[Dict]:
+        """
+        Extract video data (ID, title, etc.) from a single HTML element.
+        
+        Args:
+            element: BeautifulSoup element
+            
+        Returns:
+            Video data dictionary or None
+        """
+        # Extract video ID
+        video_id = None
+        id_attrs = ['data-asset-id', 'data-id', 'data-video-id', 'id', 'data-content-id']
+        
+        for attr in id_attrs:
+            potential_id = element.get(attr)
+            if potential_id:
+                # Clean up the ID (remove prefixes like 'asset-')
+                clean_id = re.sub(r'^(asset-|video-)', '', str(potential_id))
+                if clean_id.isdigit() and len(clean_id) >= 8:
+                    video_id = clean_id
+                    break
+        
+        if not video_id:
+            return None
+        
+        # Extract title from various possible locations
+        title = None
+        
+        # Try multiple strategies to find the title
+        title_strategies = [
+            # 1. Direct data attributes
+            lambda el: el.get('data-title'),
+            lambda el: el.get('title'),
+            lambda el: el.get('alt'),
+            lambda el: el.get('aria-label'),
+            
+            # 2. Look for title in child elements
+            lambda el: self._find_title_in_children(el),
+            
+            # 3. Look for title in nearby elements (siblings)
+            lambda el: self._find_title_in_siblings(el),
+            
+            # 4. Extract from various text content
+            lambda el: el.get_text(strip=True) if el.get_text(strip=True) and len(el.get_text(strip=True)) > 5 else None
+        ]
+        
+        for strategy in title_strategies:
+            try:
+                title = strategy(element)
+                if title and len(title.strip()) > 0 and not title.isdigit():
+                    # Clean up the title
+                    title = title.strip()
+                    # Skip if title is just the video ID or too generic
+                    if title != video_id and 'adobe' not in title.lower() and len(title) > 2:
+                        break
+                    else:
+                        title = None
+            except:
+                continue
+        
+        # If no good title found, use fallback
+        if not title:
+            title = f'Adobe_Stock_Video_{video_id}'
+        
+        # Construct video data
+        watermarked_url = f'https://stock.adobe.com/Download/Watermarked/{video_id}'
+        
+        return {
+            'id': video_id,
+            'title': title[:150],  # Limit title length
+            'thumbnail_url': element.get('data-thumbnail-url') or element.get('src'),
+            'preview_url': watermarked_url,
+            'comp_url': watermarked_url,
+            'description': element.get('data-description', ''),
+            'tags': []
+        }
+    
+    def _find_title_in_children(self, element) -> Optional[str]:
+        """Find title in child elements."""
+        title_selectors = [
+            '.title', '.name', '.caption', '.description',
+            'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+            '[class*="title"]', '[class*="name"]', '[class*="caption"]',
+            'figcaption', '.video-title', '.asset-title'
+        ]
+        
+        for selector in title_selectors:
+            title_elem = element.select_one(selector)
+            if title_elem:
+                text = title_elem.get_text(strip=True)
+                if text and len(text) > 2:
+                    return text
+        
+        return None
+    
+    def _find_title_in_siblings(self, element) -> Optional[str]:
+        """Find title in sibling elements."""
+        # Look at next few siblings for title information
+        if element.parent:
+            siblings = element.parent.find_all(['div', 'span', 'p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
+            for sibling in siblings[:5]:  # Check first 5 siblings
+                text = sibling.get_text(strip=True)
+                if text and len(text) > 5 and len(text) < 200:
+                    # Skip if it looks like a video ID or generic text
+                    if not text.isdigit() and 'adobe' not in text.lower():
+                        return text
+        
+        return None
 
     def _extract_video_ids_from_html(self, html_content: str) -> List[str]:
         """
@@ -449,6 +699,14 @@ class AdobeStockScraper:
         """Parse JSON data to extract video information."""
         videos = []
         
+        # Handle if data is a list directly
+        if isinstance(data, list):
+            for i, item_data in enumerate(data):
+                video = self._extract_video_info(item_data, str(i))
+                if video:
+                    videos.append(video)
+            return videos
+        
         # Try different JSON structures
         search_paths = [
             ['search', 'results'],
@@ -456,6 +714,13 @@ class AdobeStockScraper:
             ['data', 'search', 'results'],
             ['assets'],
             ['items'],
+            ['results'],
+            ['videos'],
+            ['data', 'assets'],
+            ['data', 'videos'],
+            ['data', 'results'],
+            ['response', 'results'],
+            ['content', 'results'],
         ]
         
         for path in search_paths:
@@ -483,6 +748,52 @@ class AdobeStockScraper:
                 
                 if videos:
                     break
+        
+        # If no videos found with standard paths, try to find any nested video data
+        if not videos:
+            videos = self._recursive_search_for_videos(data)
+        
+        return videos
+    
+    def _recursive_search_for_videos(self, data, max_depth=3, current_depth=0) -> List[Dict]:
+        """Recursively search for video data in nested JSON structures."""
+        videos = []
+        
+        if current_depth >= max_depth:
+            return videos
+        
+        if isinstance(data, dict):
+            # Look for video-specific keys
+            video_keys = ['id', 'asset_id', 'video_id', 'title', 'name']
+            has_video_data = any(key in data for key in video_keys)
+            
+            if has_video_data:
+                # Check if this looks like a video item
+                asset_type = str(data.get('asset_type', '')).lower()
+                content_type = str(data.get('content_type', '')).lower()
+                media_type = str(data.get('media_type', '')).lower()
+                
+                is_video = any(vid_type in [asset_type, content_type, media_type] 
+                              for vid_type in ['video', 'videos', 'motion'])
+                
+                # Also check for video URLs or IDs that suggest it's a video
+                has_video_url = any('video' in str(data.get(key, '')).lower() 
+                                  for key in ['url', 'preview_url', 'download_url'])
+                
+                if is_video or has_video_url or 'video' in str(data.get('title', '')).lower():
+                    video = self._extract_video_info(data, str(data.get('id', data.get('asset_id', 'unknown'))))
+                    if video:
+                        videos.append(video)
+            
+            # Continue searching in nested structures
+            for key, value in data.items():
+                if isinstance(value, (dict, list)) and key not in ['parent', 'children']:
+                    videos.extend(self._recursive_search_for_videos(value, max_depth, current_depth + 1))
+        
+        elif isinstance(data, list):
+            for item in data:
+                if isinstance(item, (dict, list)):
+                    videos.extend(self._recursive_search_for_videos(item, max_depth, current_depth + 1))
         
         return videos
 
@@ -722,16 +1033,31 @@ class AdobeStockScraper:
         
         # Create filename
         if not filename:
-            if query_prefix is not None and index is not None:
-                # Use query-based naming: query_0.mp4, query_1.mp4, etc.
-                extension = '.mp4'  # Adobe Stock videos are typically mp4
-                filename = f"{query_prefix}_{index}{extension}"
-            else:
-                # Fall back to original naming scheme
-                safe_title = re.sub(r'[^\w\s-]', '', video_data.get('title', f'Adobe_Stock_Video_{video_id}'))
-                safe_title = re.sub(r'[-\s]+', '_', safe_title)
-                extension = '.mp4'  # Adobe Stock videos are typically mp4
-                filename = f"{video_id}_{safe_title}{extension}"
+            # Extract and clean the Adobe Stock title for use as filename
+            adobe_title = video_data.get('title', f'Adobe_Stock_Video_{video_id}')
+            
+            # Clean the title to make it safe for filesystem
+            safe_title = re.sub(r'[^\w\s-]', '', adobe_title)  # Remove special characters except spaces and hyphens
+            safe_title = re.sub(r'[-\s]+', '_', safe_title)    # Replace spaces and hyphens with underscores
+            safe_title = safe_title.strip('_')                 # Remove leading/trailing underscores
+            
+            # Limit title length to avoid filesystem issues
+            if len(safe_title) > 100:
+                safe_title = safe_title[:100].rstrip('_')
+            
+            # Ensure we have a valid filename
+            if not safe_title or safe_title.isspace():
+                safe_title = f'Adobe_Stock_Video_{video_id}'
+            
+            extension = '.mp4'  # Adobe Stock videos are typically mp4
+            
+            # Use Adobe Stock title as the primary filename
+            filename = f"{safe_title}{extension}"
+            
+            # Check if file with this name already exists, if so, append video ID to make it unique
+            base_filepath = self.download_dir / filename
+            if base_filepath.exists():
+                filename = f"{safe_title}_{video_id}{extension}"
         
         filepath = self.download_dir / filename
         
@@ -844,28 +1170,19 @@ class AdobeStockScraper:
         
         self.logger.info(f"Downloads will be saved to: {query_dir}")
         
-        # Check for existing files to determine starting index
-        existing_files = list(query_dir.glob(f"{clean_query}_*.mp4")) + \
-                        list(query_dir.glob(f"{clean_query}_*.mov")) + \
-                        list(query_dir.glob(f"{clean_query}_*.webm"))
+        # Check for existing video files in the directory (any video files, since we now use title-based naming)
+        existing_files = list(query_dir.glob("*.mp4")) + \
+                        list(query_dir.glob("*.mov")) + \
+                        list(query_dir.glob("*.webm")) + \
+                        list(query_dir.glob("*.avi")) + \
+                        list(query_dir.glob("*.mkv"))
         
-        # Extract existing indices
-        existing_indices = set()
-        for file_path in existing_files:
-            filename = file_path.stem  # Get filename without extension
-            if filename.startswith(f"{clean_query}_"):
-                try:
-                    index_str = filename[len(f"{clean_query}_"):]
-                    index = int(index_str)
-                    existing_indices.add(index)
-                except ValueError:
-                    continue
-        
-        start_index = max(existing_indices) + 1 if existing_indices else 0
-        existing_count = len(existing_indices)
+        # Filter out metadata files
+        existing_files = [f for f in existing_files if f.name != "query_metadata.json"]
+        existing_count = len(existing_files)
         
         if existing_count > 0:
-            self.logger.info(f"Found {existing_count} existing files. Starting new downloads from index {start_index}")
+            self.logger.info(f"Found {existing_count} existing video files in directory")
         
         # Calculate how many new videos we need
         needed_count = count - existing_count if count > existing_count else 0
@@ -885,9 +1202,8 @@ class AdobeStockScraper:
             
             self.logger.info(f"Found {len(videos)} videos to process")
             
-            # Download videos with query-based naming, starting from the appropriate index
+            # Download videos using title-based naming
             successful_downloads = 0
-            current_index = start_index
             
             for video in videos:
                 if successful_downloads >= needed_count:
@@ -895,13 +1211,9 @@ class AdobeStockScraper:
                     
                 self.logger.info(f"Processing video {successful_downloads + 1}/{needed_count}: {video['title']}")
                 
-                # Use query-based naming with current index
-                if self.download_video(video, query_prefix=clean_query, index=current_index):
+                # Use title-based naming (no longer passing query_prefix and index)
+                if self.download_video(video):
                     successful_downloads += 1
-                    current_index += 1
-                else:
-                    # If download failed, still increment index to avoid conflicts
-                    current_index += 1
                 
                 # Rate limiting between downloads
                 if successful_downloads < needed_count:
