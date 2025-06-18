@@ -8,6 +8,10 @@ based on a search query. Authentication is required by default.
 Usage:
     python adobe_stock_scraper.py --query "nature landscape" --count 10
     python adobe_stock_scraper.py --query "ocean waves" --count 5 --no-login
+    
+    # With filtering options:
+    python adobe_stock_scraper.py --query "nature" --count 10 --max-duration 30 --exclude-titles "advertisement" "promo"
+    python adobe_stock_scraper.py --query "city" --count 20 --exclude-titles "logo" "text" "watermark"
 """
 
 import requests
@@ -38,7 +42,8 @@ except ImportError:
     print("Browser authentication will not be available.")
 
 class AdobeStockScraper:
-    def __init__(self, download_dir: str = "downloads", delay: float = 1.0, use_auth: bool = True):
+    def __init__(self, download_dir: str = "downloads", delay: float = 1.0, use_auth: bool = True, 
+                 max_duration_seconds: int = None, exclude_title_patterns: List[str] = None):
         """
         Initialize the Adobe Stock scraper.
         
@@ -46,11 +51,15 @@ class AdobeStockScraper:
             download_dir: Directory to save downloaded videos
             delay: Delay between requests in seconds
             use_auth: Whether to use browser-based authentication (default: True)
+            max_duration_seconds: Maximum video duration in seconds (None for no limit)
+            exclude_title_patterns: List of text patterns to exclude from video titles (case-insensitive)
         """
         self.download_dir = Path(download_dir)
         self.download_dir.mkdir(exist_ok=True)
         self.delay = delay
         self.use_auth = use_auth
+        self.max_duration_seconds = max_duration_seconds
+        self.exclude_title_patterns = exclude_title_patterns or []
         self.session = requests.Session()
         self.authenticated = False
         self.cookies_file = Path("adobe_stock_cookies.json")
@@ -71,6 +80,12 @@ class AdobeStockScraper:
         # Set up logging
         logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
         self.logger = logging.getLogger(__name__)
+        
+        # Log filtering settings
+        if self.max_duration_seconds:
+            self.logger.info(f"Video duration filter: max {self.max_duration_seconds} seconds")
+        if self.exclude_title_patterns:
+            self.logger.info(f"Title exclusion patterns: {self.exclude_title_patterns}")
         
         # Try to load existing cookies if authentication is requested
         if self.use_auth:
@@ -237,24 +252,44 @@ class AdobeStockScraper:
             
             # Check for login indicators in the response
             if response.status_code == 200:
-                # Look for signs that we're logged in
-                content = response.text
-                if any(indicator in content.lower() for indicator in ['sign out', 'logout', 'account', 'profile']):
-                    self.authenticated = True
-                    return True
-                elif 'sign in' in content.lower() or 'login' in content.lower():
-                    self.authenticated = False
-                    return False
-                else:
-                    # Assume we're authenticated if we can access the page
-                    self.authenticated = True
-                    return True
-            
-            return False
-            
-        except Exception as e:
+                # Success - likely authenticated or public access
+                self.authenticated = True
+                return True
+            else:
+                # Non-200 status might indicate auth issues
+                self.authenticated = False
+                return False
+                
+        except requests.RequestException as e:
             self.logger.error(f"Error checking authentication: {e}")
             return False
+
+    def should_filter_video(self, video_data: Dict) -> bool:
+        """
+        Check if a video should be filtered out based on title patterns and duration.
+        
+        Args:
+            video_data: Video data dictionary
+            
+        Returns:
+            True if video should be filtered out, False otherwise
+        """
+        title = video_data.get('title', '').lower()
+        
+        # Check title exclusion patterns
+        for pattern in self.exclude_title_patterns:
+            if pattern.lower() in title:
+                self.logger.info(f"Filtering out video '{video_data.get('title', '')}' - matches exclusion pattern: '{pattern}'")
+                return True
+        
+        # Check duration if available (Note: Adobe Stock may not provide duration in search results)
+        duration = video_data.get('duration_seconds')
+        if self.max_duration_seconds and duration:
+            if duration > self.max_duration_seconds:
+                self.logger.info(f"Filtering out video '{video_data.get('title', '')}' - duration {duration}s exceeds limit of {self.max_duration_seconds}s")
+                return True
+        
+        return False
 
     def search_videos(self, query: str, limit: int = 10) -> List[Dict]:
         """
@@ -605,10 +640,39 @@ class AdobeStockScraper:
                         title = None
             except:
                 continue
-        
+
         # If no good title found, use fallback
         if not title:
             title = f'Adobe_Stock_Video_{video_id}'
+        
+        # Extract duration if available
+        duration_seconds = None
+        duration_attrs = ['data-duration', 'data-length', 'duration', 'data-time']
+        for attr in duration_attrs:
+            duration_value = element.get(attr)
+            if duration_value:
+                try:
+                    # Try to parse as seconds
+                    if isinstance(duration_value, str):
+                        duration_str = duration_value.strip().lower()
+                        if duration_str.endswith('s'):
+                            duration_seconds = int(duration_str[:-1])
+                            break
+                        elif ':' in duration_str:
+                            # Parse MM:SS format
+                            parts = duration_str.split(':')
+                            if len(parts) == 2:
+                                minutes, seconds = parts
+                                duration_seconds = int(minutes) * 60 + int(seconds)
+                                break
+                        elif duration_str.isdigit():
+                            duration_seconds = int(duration_str)
+                            break
+                    elif isinstance(duration_value, (int, float)):
+                        duration_seconds = int(duration_value)
+                        break
+                except (ValueError, TypeError):
+                    continue
         
         # Construct video data
         watermarked_url = f'https://stock.adobe.com/Download/Watermarked/{video_id}'
@@ -620,7 +684,8 @@ class AdobeStockScraper:
             'preview_url': watermarked_url,
             'comp_url': watermarked_url,
             'description': element.get('data-description', ''),
-            'tags': []
+            'tags': [],
+            'duration_seconds': duration_seconds
         }
     
     def _find_title_in_children(self, element) -> Optional[str]:
@@ -827,6 +892,35 @@ class AdobeStockScraper:
         if not video_id:
             video_id = item_id
         
+        # Extract duration information if available
+        duration_seconds = None
+        duration_fields = ['duration', 'duration_seconds', 'length', 'length_seconds', 'time']
+        for field in duration_fields:
+            if field in item_data:
+                try:
+                    duration_value = item_data[field]
+                    if isinstance(duration_value, (int, float)):
+                        duration_seconds = int(duration_value)
+                        break
+                    elif isinstance(duration_value, str):
+                        # Try to parse duration string (e.g., "30s", "1:30", "90")
+                        duration_str = duration_value.strip().lower()
+                        if duration_str.endswith('s'):
+                            duration_seconds = int(duration_str[:-1])
+                            break
+                        elif ':' in duration_str:
+                            # Parse MM:SS format
+                            parts = duration_str.split(':')
+                            if len(parts) == 2:
+                                minutes, seconds = parts
+                                duration_seconds = int(minutes) * 60 + int(seconds)
+                                break
+                        elif duration_str.isdigit():
+                            duration_seconds = int(duration_str)
+                            break
+                except (ValueError, TypeError):
+                    continue
+        
         # Construct the watermarked download URL
         watermarked_url = f'https://stock.adobe.com/Download/Watermarked/{video_id}'
         
@@ -837,7 +931,8 @@ class AdobeStockScraper:
             'preview_url': watermarked_url,
             'comp_url': watermarked_url,
             'description': item_data.get('description', ''),
-            'tags': item_data.get('keywords', item_data.get('tags', []))
+            'tags': item_data.get('keywords', item_data.get('tags', [])),
+            'duration_seconds': duration_seconds
         }
         
         return video_info
@@ -935,6 +1030,35 @@ class AdobeStockScraper:
                 element.get_text(strip=True) or 
                 f"Adobe_Stock_Video_{video_id}")
         
+        # Extract duration if available
+        duration_seconds = None
+        duration_attrs = ['data-duration', 'data-length', 'duration', 'data-time']
+        for attr in duration_attrs:
+            duration_value = attrs.get(attr)
+            if duration_value:
+                try:
+                    # Try to parse as seconds
+                    if isinstance(duration_value, str):
+                        duration_str = duration_value.strip().lower()
+                        if duration_str.endswith('s'):
+                            duration_seconds = int(duration_str[:-1])
+                            break
+                        elif ':' in duration_str:
+                            # Parse MM:SS format
+                            parts = duration_str.split(':')
+                            if len(parts) == 2:
+                                minutes, seconds = parts
+                                duration_seconds = int(minutes) * 60 + int(seconds)
+                                break
+                        elif duration_str.isdigit():
+                            duration_seconds = int(duration_str)
+                            break
+                    elif isinstance(duration_value, (int, float)):
+                        duration_seconds = int(duration_value)
+                        break
+                except (ValueError, TypeError):
+                    continue
+        
         return {
             'id': video_id,
             'title': title[:100],  # Limit title length
@@ -942,7 +1066,8 @@ class AdobeStockScraper:
             'preview_url': watermarked_url,
             'comp_url': watermarked_url,
             'description': attrs.get('data-description', ''),
-            'tags': []
+            'tags': [],
+            'duration_seconds': duration_seconds
         }
 
     def _extract_video_data_regex(self, html_content: str) -> List[Dict]:
@@ -995,7 +1120,8 @@ class AdobeStockScraper:
                 'preview_url': watermarked_url,
                 'comp_url': watermarked_url,
                 'description': '',
-                'tags': []
+                'tags': [],
+                'duration_seconds': None
             }
             videos.append(video_info)
         
@@ -1142,6 +1268,10 @@ class AdobeStockScraper:
             "original_query": query,
             "clean_query": clean_query,
             "authenticated": self.authenticated,
+            "filtering_settings": {
+                "max_duration_seconds": self.max_duration_seconds,
+                "exclude_title_patterns": self.exclude_title_patterns
+            },
             "created_at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
             "last_updated": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
         }
@@ -1202,10 +1332,25 @@ class AdobeStockScraper:
             
             self.logger.info(f"Found {len(videos)} videos to process")
             
+            # Apply filtering to videos
+            filtered_videos = []
+            filtered_count = 0
+            
+            for video in videos:
+                if self.should_filter_video(video):
+                    filtered_count += 1
+                    continue
+                filtered_videos.append(video)
+            
+            if filtered_count > 0:
+                self.logger.info(f"Filtered out {filtered_count} videos based on exclusion criteria")
+            
+            self.logger.info(f"Processing {len(filtered_videos)} videos after filtering")
+            
             # Download videos using title-based naming
             successful_downloads = 0
             
-            for video in videos:
+            for video in filtered_videos:
                 if successful_downloads >= needed_count:
                     break
                     
@@ -1229,6 +1374,9 @@ class AdobeStockScraper:
                 metadata["last_download_session"] = {
                     "requested_count": count,
                     "new_downloads": successful_downloads,
+                    "videos_found": len(videos),
+                    "videos_filtered_out": filtered_count,
+                    "videos_processed": len(filtered_videos),
                     "session_timestamp": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
                 }
                 
@@ -1251,12 +1399,20 @@ def main():
     parser.add_argument('--output', '-o', default='downloads', help='Output directory (default: downloads)')
     parser.add_argument('--delay', '-d', type=float, default=1.0, help='Delay between requests in seconds (default: 1.0)')
     parser.add_argument('--no-login', action='store_true', help='Skip browser-based authentication (may result in 401 errors)')
+    parser.add_argument('--max-duration', type=int, help='Maximum video duration in seconds (excludes longer videos)')
+    parser.add_argument('--exclude-titles', nargs='*', help='Text patterns to exclude from video titles (case-insensitive)')
     
     args = parser.parse_args()
     
     # Create scraper instance (authentication enabled by default)
     use_auth = not args.no_login  # Reverse the logic - auth is default, --no-login disables it
-    scraper = AdobeStockScraper(download_dir=args.output, delay=args.delay, use_auth=use_auth)
+    scraper = AdobeStockScraper(
+        download_dir=args.output, 
+        delay=args.delay, 
+        use_auth=use_auth,
+        max_duration_seconds=args.max_duration,
+        exclude_title_patterns=args.exclude_titles or []
+    )
     
     # Create clean query name for the subdirectory
     clean_query = re.sub(r'[^\w\s-]', '', args.query)
