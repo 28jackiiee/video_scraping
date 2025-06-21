@@ -43,6 +43,20 @@ def read_metadata(directory_path):
             print(f"   - New Downloads: {session.get('new_downloads', 'N/A')}")
             print(f"   - Session Time: {session.get('session_timestamp', 'N/A')}")
         
+        # Display video file mappings if available
+        if 'video_file_mappings' in metadata:
+            video_mappings = metadata['video_file_mappings']
+            print(f"🔗 Video ID to Filename Mappings ({len(video_mappings)} videos):")
+            for video_id, mapping in video_mappings.items():
+                filename = mapping.get('filename', 'N/A')
+                title = mapping.get('title', 'N/A')
+                download_time = mapping.get('download_timestamp', 'N/A')
+                print(f"   📹 ID: {video_id}")
+                print(f"      File: {filename}")
+                print(f"      Title: {title[:80]}{'...' if len(title) > 80 else ''}")
+                print(f"      Downloaded: {download_time}")
+                print()
+        
         # Count actual video files
         video_extensions = ['.mp4', '.mov', '.webm']
         video_files = []
@@ -50,6 +64,17 @@ def read_metadata(directory_path):
             video_files.extend(dir_path.glob(f"*{ext}"))
         
         print(f"📹 Actual Video Files Found: {len(video_files)}")
+        
+        # Check for unmapped files (files that exist but aren't in the mapping)
+        if 'video_file_mappings' in metadata:
+            mapped_files = {mapping['filename'] for mapping in metadata['video_file_mappings'].values()}
+            actual_files = {f.name for f in video_files}
+            unmapped_files = actual_files - mapped_files
+            
+            if unmapped_files:
+                print(f"⚠️  Unmapped Files ({len(unmapped_files)} files without video ID mapping):")
+                for filename in sorted(unmapped_files):
+                    print(f"   - {filename}")
         
         return True
         

@@ -1,0 +1,20 @@
+For downloading videos from Adobe Stock
+
+python adobe_stock_scraper.py \
+--q "slow motion" \
+--c 10 \
+--min-duration 5 \
+--max-duration 30 \
+--exclude-titles "slow motion" \
+
+--json-output \
+--intended-label "deep focus"
+
+
+
+For filtering with CLIPScore
+
+conda run python video_filter_m4.py \
+--source_dir downloads \
+--query "slow motion" \
+--top_k 5
