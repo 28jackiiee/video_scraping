@@ -38,7 +38,7 @@ This repository contains a suite of Python scripts designed to scrape, download,
 
 ```bash
 git clone https://github.com/28jackiiee/video_scraping.git
-cd scraping
+cd video_scraping
 ```
 
 ### 2. Create a Virtual Environment (Recommended)
