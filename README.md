@@ -113,13 +113,7 @@ python adobe_stock_scraper.py --query "shallow focus" --count 100 --max-size 5M 
 
 **Disabling Authentication or Ignore List:**
 ```bash
-python adobe_stock_scraper.py --query "ocean waves" --count 5 --no-login
 python adobe_stock_scraper.py --query "city skyline" --count 10 --no-ignore-list
-```
-
-**Combined with Random and JSON output:**
-```bash
-python adobe_stock_scraper.py --random --json-output --intended-label "deep focus" --sample-from 1000
 ```
 
 ### 2. Metadata Reader (read_metadata.py)
