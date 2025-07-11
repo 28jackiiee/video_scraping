@@ -7,10 +7,47 @@ based on a search query. Authentication is required by default.
 
 Can also create JSON metadata dictionaries instead of downloading videos.
 
+ENHANCED DUPLICATE CHECKING:
+This script now includes comprehensive duplicate checking mechanisms:
+
+1. Cross-Session Duplicate Prevention:
+   - Loads existing video IDs from metadata files and filenames
+   - Prevents re-downloading videos from previous sessions
+   - Tracks video IDs across multiple script runs
+
+2. Intra-Session Duplicate Prevention:
+   - Global video ID tracking across all search attempts
+   - Prevents processing the same video ID multiple times in one session
+   - Enhanced search result deduplication
+
+3. Multi-Level ID Extraction:
+   - Extracts video IDs from existing filenames using multiple patterns
+   - Reads video mappings from metadata JSON files
+   - Handles different filename formats consistently
+
+4. JSON Mode Duplicate Prevention:
+   - Checks existing JSON files for duplicate video IDs
+   - Prevents including the same videos in multiple JSON outputs
+   - Cross-references with previous JSON generations
+
+5. Download-Level Duplicate Checking:
+   - Video ID-based duplicate checking (not just filename-based)
+   - Checks for existing files with same video ID but different names
+   - Robust file existence validation
+
 Usage:
     # Download videos (default mode)
     python adobe_stock_scraper.py --query "nature landscape" --count 10
     python adobe_stock_scraper.py --query "ocean waves" --count 5 --no-login
+    
+    # Random video scraping - get completely random videos from various categories
+    python adobe_stock_scraper.py --random --count 20
+    python adobe_stock_scraper.py --random --count 15 --json-output --intended-label "Random Videos"
+    python adobe_stock_scraper.py --random --count 10 --max-duration 45 --exclude-titles "watermark"
+    
+    # Random sampling - search more videos and randomly select from them
+    python adobe_stock_scraper.py --query "nature landscape" --count 10 --sample-from 50
+    python adobe_stock_scraper.py --query "city skyline" --count 15 --sample-from 100 --json-output --intended-label "Urban Scenes"
     
     # Create JSON metadata instead of downloading
     python adobe_stock_scraper.py --query "nature landscape" --count 10 --json-output --intended-label "Nature Videos"
@@ -19,6 +56,12 @@ Usage:
     # With filtering options:
     python adobe_stock_scraper.py --query "nature" --count 10 --max-duration 30 --exclude-titles "advertisement" "promo"
     python adobe_stock_scraper.py --query "city" --count 20 --exclude-titles "logo" "text" "watermark" --json-output --intended-label "Urban Scenes"
+    python adobe_stock_scraper.py --query "animals" --count 15 --max-size 50M --max-duration 60 --exclude-titles "watermark"
+    python adobe_stock_scraper.py --query "technology" --count 10 --max-size 100MB --json-output --intended-label "Tech Videos"
+    
+    # Random sampling with filtering:
+    python adobe_stock_scraper.py --query "wildlife" --count 10 --sample-from 80 --max-duration 45 --exclude-titles "watermark" "stock"
+    python adobe_stock_scraper.py --query "business" --count 20 --sample-from 150 --json-output --intended-label "Business Videos" --max-size 75M
 
 JSON Output Format:
     {
@@ -45,6 +88,7 @@ import re
 from typing import List, Dict, Optional, Tuple
 import logging
 from bs4 import BeautifulSoup
+import random  # Added for random sampling
 
 # Selenium imports for browser automation
 try:
@@ -61,10 +105,18 @@ except ImportError:
     print("Warning: Selenium not installed. Install with: pip install selenium")
     print("Browser authentication will not be available.")
 
+# Import ignore list functionality
+try:
+    from add_to_ignore_list import IgnoreListManager
+    IGNORE_LIST_AVAILABLE = True
+except ImportError:
+    IGNORE_LIST_AVAILABLE = False
+
 class AdobeStockScraper:
     def __init__(self, download_dir: str = "downloads", delay: float = 1.0, use_auth: bool = True, 
                  max_duration_seconds: int = None, min_duration_seconds: int = None, exclude_title_patterns: List[str] = None, 
-                 json_output: bool = False, intended_label: str = None):
+                 json_output: bool = False, intended_label: str = None, max_size_bytes: int = None, sample_from: int = None,
+                 ignore_list_path: str = None, query: str = None, random_mode: bool = False, use_ignore_list: bool = True):
         """
         Initialize the Adobe Stock scraper.
         
@@ -77,6 +129,12 @@ class AdobeStockScraper:
             exclude_title_patterns: List of text patterns to exclude from video titles (case-insensitive)
             json_output: Whether to create JSON dictionary instead of downloading videos (default: False)
             intended_label: Label to use in JSON output structure (required if json_output is True)
+            max_size_bytes: Maximum video file size in bytes (None for no limit)
+            sample_from: If specified, search for this many videos and randomly sample the requested count from them (None for no sampling)
+            ignore_list_path: Path to the ignore list file (None for auto-detection based on query)
+            query: Search query (used to determine query-specific ignore list if ignore_list_path is None)
+            random_mode: Whether to scrape completely random videos from various categories (default: False)
+            use_ignore_list: Whether to use ignore list functionality (default: True)
         """
         self.download_dir = Path(download_dir)
         self.download_dir.mkdir(exist_ok=True)
@@ -87,13 +145,67 @@ class AdobeStockScraper:
         self.exclude_title_patterns = exclude_title_patterns or []
         self.json_output = json_output
         self.intended_label = intended_label
+        self.max_size_bytes = max_size_bytes
+        self.sample_from = sample_from
+        self.random_mode = random_mode
+        self.use_ignore_list = use_ignore_list
         self.session = requests.Session()
         self.authenticated = False
         self.cookies_file = Path("adobe_stock_cookies.json")
+        self.current_query = query  # Store current query for ignore list determination
+        
+        # Define categories for random mode
+        self.random_categories = [
+            # Nature & Landscapes
+            "nature", "landscape", "ocean", "mountain", "forest", "sunset", "sunrise", "beach", "lake", "river",
+            "desert", "waterfall", "clouds", "sky", "grass", "flowers", "trees", "wildlife", "birds", "animals",
+            
+            # Urban & Architecture
+            "city", "building", "architecture", "street", "urban", "skyscraper", "bridge", "road", "traffic",
+            "downtown", "skyline", "construction", "modern", "historic", "transportation",
+            
+            # Business & Technology
+            "business", "office", "meeting", "technology", "computer", "data", "digital", "innovation",
+            "finance", "corporate", "workspace", "teamwork", "presentation", "analytics", "startup",
+            
+            # Lifestyle & People
+            "people", "family", "friends", "lifestyle", "health", "fitness", "cooking", "travel",
+            "vacation", "celebration", "sports", "exercise", "meditation", "shopping", "education",
+            
+            # Abstract & Artistic
+            "abstract", "motion", "particles", "light", "colors", "artistic", "creative", "design",
+            "pattern", "texture", "minimalist", "geometric", "fluid", "energy", "bokeh",
+            
+            # Food & Drink
+            "food", "cooking", "kitchen", "restaurant", "coffee", "wine", "ingredients", "fresh",
+            "organic", "healthy", "delicious", "dining", "chef", "recipe", "meal",
+            
+            # Industry & Science
+            "industry", "factory", "manufacturing", "science", "laboratory", "research", "medical",
+            "healthcare", "agriculture", "farming", "machinery", "engineering", "innovation",
+            
+            # Seasonal & Weather
+            "spring", "summer", "autumn", "winter", "snow", "rain", "storm", "weather", "seasons",
+            "holiday", "christmas", "halloween", "new year", "celebration", "festival"
+        ]
+        
+        # Load query-specific ignore list (only if ignore list is enabled)
+        if self.use_ignore_list:
+            self.current_ignored_video_ids = self._load_query_specific_ignore_list(query, ignore_list_path)
+        else:
+            self.current_ignored_video_ids = set()
+        
+        # Enhanced duplicate tracking
+        self.global_seen_video_ids = set()  # Track all video IDs seen across all operations
+        self.existing_video_ids = set()     # Track video IDs from existing files
         
         # Validate JSON mode requirements
         if self.json_output and not self.intended_label:
             raise ValueError("intended_label is required when json_output is True")
+        
+        # Validate sampling requirements
+        if self.sample_from is not None and self.sample_from <= 0:
+            raise ValueError("sample_from must be a positive integer when specified")
         
         # Set up headers to mimic a real browser
         self.session.headers.update({
@@ -112,19 +224,588 @@ class AdobeStockScraper:
         logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
         self.logger = logging.getLogger(__name__)
         
-        # Log filtering settings
+        # Only log filtering settings if they're actually set
         if self.max_duration_seconds:
-            self.logger.info(f"Video duration filter: max {self.max_duration_seconds} seconds")
+            self.logger.debug(f"Video duration filter: max {self.max_duration_seconds} seconds")
         if self.min_duration_seconds:
-            self.logger.info(f"Video duration filter: min {self.min_duration_seconds} seconds")
+            self.logger.debug(f"Video duration filter: min {self.min_duration_seconds} seconds")
+        if self.max_size_bytes:
+            self.logger.debug(f"Video size filter: max {self.max_size_bytes} bytes")
         if self.exclude_title_patterns:
-            self.logger.info(f"Title exclusion patterns: {self.exclude_title_patterns}")
+            self.logger.debug(f"Title exclusion patterns: {self.exclude_title_patterns}")
+        if self.sample_from:
+            self.logger.debug(f"Random sampling: selecting from {self.sample_from} videos")
+        if self.random_mode:
+            self.logger.debug(f"Random mode: scraping from {len(self.random_categories)} categories")
         if self.json_output:
-            self.logger.info(f"JSON output mode enabled with label: {self.intended_label}")
-        
+            self.logger.debug(f"JSON output mode: creating metadata dictionary with label '{self.intended_label}'")
+        if not self.use_ignore_list:
+            self.logger.debug(f"Ignore list functionality disabled")
+        elif len(self.current_ignored_video_ids) > 0:
+            ignore_file_info = f" from query-specific ignore list" if query else " from ignore list"
+            self.logger.debug(f"Loaded {len(self.current_ignored_video_ids)} ignored video IDs{ignore_file_info}")
+    
         # Try to load existing cookies if authentication is requested
         if self.use_auth:
             self.load_cookies()
+
+    def get_random_search_queries(self, count: int) -> List[str]:
+        """
+        Generate random search queries for random mode.
+        
+        Args:
+            count: Number of queries to generate
+            
+        Returns:
+            List of random search queries
+        """
+        # Create a mix of single categories and combined categories
+        queries = []
+        
+        # Single category queries (70% of the time)
+        single_category_count = int(count * 0.7)
+        for _ in range(single_category_count):
+            queries.append(random.choice(self.random_categories))
+        
+        # Combined category queries (30% of the time)
+        combined_category_count = count - single_category_count
+        for _ in range(combined_category_count):
+            # Randomly combine 2-3 categories
+            num_categories = random.randint(2, 3)
+            selected_categories = random.sample(self.random_categories, num_categories)
+            queries.append(" ".join(selected_categories))
+        
+        return queries
+
+    def scrape_random_videos(self, count: int = 10) -> int:
+        """
+        Scrape completely random videos from various categories.
+        
+        Args:
+            count: Number of videos to download/process
+            
+        Returns:
+            Number of videos downloaded/processed
+        """
+        print(f"🎲 Random Mode: Scraping {count} random videos from diverse categories")
+        
+        # Show ignore list information for random mode
+        ignore_list_size = len(self.current_ignored_video_ids) if self.use_ignore_list else 0
+        if ignore_list_size > 0:
+            print(f"🚫 Ignore list contains {ignore_list_size} video IDs - will search more aggressively to find unique videos")
+        
+        # Handle JSON output mode for random videos
+        if self.json_output:
+            return self._handle_random_json_output_mode(count)
+        
+        # Store original download directory
+        original_download_dir = self.download_dir
+        
+        # Create a subdirectory for random videos
+        random_dir = self.download_dir / "random_videos"
+        random_dir.mkdir(exist_ok=True)
+        
+        # Update download directory to the random subdirectory
+        self.download_dir = random_dir
+        
+        # Load existing video IDs to prevent duplicates
+        existing_video_ids = self.load_existing_video_ids(random_dir)
+        
+        # Count existing video files
+        video_extensions = ['.mp4', '.mov', '.webm', '.avi', '.mkv']
+        existing_files = []
+        for ext in video_extensions:
+            existing_files.extend(random_dir.glob(f"*{ext}"))
+        
+        # Filter out metadata files
+        existing_files = [f for f in existing_files if f.name != "random_metadata.json"]
+        existing_count = len(existing_files)
+        
+        if existing_count > 0:
+            print(f"Found {existing_count} existing random videos")
+        
+        # Calculate how many new videos we need
+        needed_count = count - existing_count if count > existing_count else 0
+        
+        if needed_count <= 0:
+            print(f"Already have {existing_count} random videos, no additional downloads needed")
+            return existing_count
+        
+        print(f"Need to download {needed_count} more random videos")
+        if ignore_list_size > 0:
+            print(f"📈 Will search across multiple categories to account for {ignore_list_size} ignored video IDs")
+        print(f"Downloads will be saved to: {random_dir}")
+        
+        try:
+            # Generate diverse random queries
+            search_queries = self.get_random_search_queries(needed_count * 2)  # Generate more queries than needed
+            random.shuffle(search_queries)  # Shuffle the queries
+            
+            # Track successful downloads and metadata
+            successful_downloads = 0
+            video_filename_mapping = {}
+            total_videos_processed = 0
+            total_filtered_count = 0
+            queries_used = []
+            
+            # Load existing metadata to preserve video file mappings
+            metadata_file = random_dir / "random_metadata.json"
+            existing_video_mappings = {}
+            if metadata_file.exists():
+                try:
+                    with open(metadata_file, 'r', encoding='utf-8') as f:
+                        existing_metadata = json.load(f)
+                        existing_video_mappings = existing_metadata.get("video_file_mappings", {})
+                except (json.JSONDecodeError, KeyError):
+                    pass
+            
+            # Search through different categories until we have enough videos
+            for query in search_queries:
+                if successful_downloads >= needed_count:
+                    break
+                
+                print(f"🔍 Searching in category: '{query}'")
+                queries_used.append(query)
+                
+                # Search for videos in this category
+                videos_per_query = min(10, needed_count - successful_downloads + 5)  # Get a few extra
+                videos = self.search_videos(query, videos_per_query)
+                
+                if not videos:
+                    self.logger.debug(f"No videos found for category: {query}")
+                    continue
+                
+                # Filter and process videos
+                for video in videos:
+                    if successful_downloads >= needed_count:
+                        break
+                    
+                    # Skip if duplicate or in ignore list
+                    if self.is_duplicate_video(video):
+                        continue
+                    
+                    # Apply title/pattern filtering
+                    if self.should_filter_video(video):
+                        total_filtered_count += 1
+                        continue
+                    
+                    total_videos_processed += 1
+                    
+                    # Add to global tracking
+                    self.global_seen_video_ids.add(str(video.get('id', '')))
+                    
+                    # Try to download the video
+                    success, filename = self.download_video(video, index=successful_downloads + 1)
+                    if success:
+                        successful_downloads += 1
+                        # Store the mapping between video ID and filename
+                        video_filename_mapping[video['id']] = {
+                            'filename': filename,
+                            'title': video['title'],
+                            'url': video.get('comp_url') or video.get('preview_url') or f'https://stock.adobe.com/Download/Watermarked/{video["id"]}',
+                            'download_timestamp': time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+                            'category': query,
+                            'random_mode': True
+                        }
+                    
+                    # Rate limiting between downloads
+                    time.sleep(self.delay)
+                
+                # Rate limiting between categories
+                time.sleep(self.delay)
+            
+            total_files = existing_count + successful_downloads
+            print(f"Random download complete: {successful_downloads} new videos downloaded, {total_files} total")
+            
+            if successful_downloads < needed_count:
+                remaining = needed_count - successful_downloads
+                warning_msg = f"Warning: Could not download all requested videos. Missing {remaining} videos."
+                if ignore_list_size > 0:
+                    warning_msg += f"\n         Large ignore list ({ignore_list_size} IDs) may have limited available unique results."
+                print(warning_msg)
+            
+            # Update metadata for random videos
+            metadata = {
+                "mode": "random",
+                "requested_count": count,
+                "created_at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+                "last_updated": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+                "total_videos_downloaded": total_files,
+                "categories_used": queries_used,
+                "last_download_session": {
+                    "requested_count": count,
+                    "new_downloads": successful_downloads,
+                    "videos_processed": total_videos_processed,
+                    "videos_filtered_out": total_filtered_count,
+                    "categories_searched": len(queries_used),
+                    "ignore_list_size": ignore_list_size,
+                    "session_timestamp": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+                },
+                "search_parameters": {
+                    "max_duration_seconds": self.max_duration_seconds,
+                    "min_duration_seconds": self.min_duration_seconds,
+                    "max_size_bytes": self.max_size_bytes,
+                    "exclude_title_patterns": self.exclude_title_patterns,
+                    "sample_from": self.sample_from,
+                    "intended_label": self.intended_label,
+                    "random_mode": True,
+                    "ignore_list_size": ignore_list_size
+                }
+            }
+            
+            # Add or update video ID to filename mappings
+            if "video_file_mappings" not in metadata:
+                metadata["video_file_mappings"] = {}
+            
+            metadata["video_file_mappings"] = existing_video_mappings.copy()
+            metadata["video_file_mappings"].update(video_filename_mapping)
+            
+            # Save metadata
+            try:
+                with open(metadata_file, 'w', encoding='utf-8') as f:
+                    json.dump(metadata, f, indent=2, ensure_ascii=False)
+                
+                self.logger.debug(f"Updated random metadata with {len(video_filename_mapping)} new video file mappings")
+            except Exception as e:
+                self.logger.warning(f"Failed to update metadata file: {e}")
+            
+            return total_files
+            
+        finally:
+            # Restore original download directory
+            self.download_dir = original_download_dir
+
+    def _handle_random_json_output_mode(self, count: int) -> int:
+        """
+        Handle JSON output mode for random videos.
+        
+        Args:
+            count: Number of videos to include in JSON
+            
+        Returns:
+            Number of videos processed for JSON output
+        """
+        print(f"🎲 Random JSON Mode: Creating metadata for {count} random videos")
+        
+        # Show ignore list information for random JSON mode
+        ignore_list_size = len(self.current_ignored_video_ids) if self.use_ignore_list else 0
+        if ignore_list_size > 0:
+            print(f"🚫 Ignore list contains {ignore_list_size} video IDs - will search more categories to find unique videos")
+        
+        # Generate diverse random queries
+        search_queries = self.get_random_search_queries(count)
+        random.shuffle(search_queries)
+        
+        all_videos = []
+        total_filtered_count = 0
+        categories_used = []
+        
+        # Search through different categories
+        videos_per_query = max(3, count // len(search_queries) + 1)
+        
+        for query in search_queries:
+            if len(all_videos) >= count * 2:  # Get enough candidates
+                break
+            
+            print(f"🔍 Searching in category: '{query}'")
+            categories_used.append(query)
+            
+            # Search for videos in this category
+            videos = self.search_videos(query, videos_per_query)
+            
+            if not videos:
+                continue
+            
+            # Filter and add videos
+            for video in videos:
+                if len(all_videos) >= count * 2:
+                    break
+                
+                # Skip if duplicate or in ignore list
+                if self.is_duplicate_video(video):
+                    continue
+                
+                # Apply title/pattern filtering
+                if self.should_filter_video(video):
+                    total_filtered_count += 1
+                    continue
+                
+                # Add category information to video data
+                video['category'] = query
+                video['random_mode'] = True
+                all_videos.append(video)
+            
+            # Rate limiting between categories
+            time.sleep(self.delay)
+        
+        # Randomly sample from all collected videos
+        if len(all_videos) > count:
+            videos_to_process = random.sample(all_videos, count)
+            print(f"Randomly selected {count} videos from {len(all_videos)} candidates across {len(categories_used)} categories")
+        else:
+            videos_to_process = all_videos
+            if len(videos_to_process) < count:
+                warning_msg = f"Warning: Could only find {len(videos_to_process)} videos that pass filters out of {count} requested"
+                if ignore_list_size > 0:
+                    warning_msg += f" (ignore list: {ignore_list_size} IDs)"
+                print(warning_msg)
+        
+        # Create JSON output
+        json_data = self.create_random_json_output(videos_to_process, categories_used)
+        
+        # Add metadata
+        json_data["_metadata"] = {
+            "random_mode": True,
+            "categories_used": categories_used,
+            "total_candidates_found": len(all_videos),
+            "videos_filtered_out": total_filtered_count,
+            "final_count": len(videos_to_process),
+            "ignore_list_size": ignore_list_size,
+            "generation_timestamp": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+        }
+        
+        # Save JSON to file
+        json_filepath = self.save_random_json_output(json_data)
+        
+        print(f"Random JSON output complete: {len(videos_to_process)} videos saved to {json_filepath}")
+        
+        return len(videos_to_process)
+
+    def create_random_json_output(self, videos: List[Dict], categories_used: List[str]) -> Dict:
+        """
+        Create JSON dictionary structure for random video metadata.
+        
+        Args:
+            videos: List of video data dictionaries
+            categories_used: List of categories that were searched
+            
+        Returns:
+            JSON dictionary with the requested structure
+        """
+        # Group videos by category for organized output
+        categorized_videos = {}
+        uncategorized_videos = []
+        
+        for video in videos:
+            category = video.get('category', 'Mixed')
+            
+            if category not in categorized_videos:
+                categorized_videos[category] = []
+            
+            # Create video entry
+            video_entry = {
+                "id": video.get('id', ''),
+                "caption": video.get('title', ''),
+                "url": video.get('comp_url') or video.get('preview_url') or f'https://stock.adobe.com/Download/Watermarked/{video.get("id", "")}'
+            }
+            
+            categorized_videos[category].append(video_entry)
+        
+        # Create the final JSON structure
+        json_output = {
+            self.intended_label: categorized_videos
+        }
+        
+        return json_output
+
+    def save_random_json_output(self, json_data: Dict) -> str:
+        """
+        Save random JSON data to file.
+        
+        Args:
+            json_data: JSON dictionary to save
+            
+        Returns:
+            Path to saved JSON file
+        """
+        # Create filename with timestamp
+        timestamp = time.strftime("%Y%m%d_%H%M%S", time.localtime())
+        filename = f"random_videos_{timestamp}.json"
+        filepath = self.download_dir / filename
+        
+        # Save JSON data
+        try:
+            with open(filepath, 'w', encoding='utf-8') as f:
+                json.dump(json_data, f, indent=2, ensure_ascii=False)
+            self.logger.debug(f"Random JSON output saved to: {filepath}")
+            return str(filepath)
+        except Exception as e:
+            self.logger.error(f"Failed to save random JSON output: {e}")
+            raise
+
+    def _load_query_specific_ignore_list(self, query: str, ignore_list_path: str = None) -> set:
+        """
+        Load query-specific ignore list from a file.
+        
+        Args:
+            query: Search query string (used to generate path if ignore_list_path not provided)
+            ignore_list_path: Path to the ignore list file (None for auto-detection based on query)
+            
+        Returns:
+            Set of video IDs to ignore
+        """
+        # If no query is provided (e.g., random mode), return empty set
+        if not query and not ignore_list_path:
+            return set()
+        
+        # Determine the ignore list file path
+        if ignore_list_path:
+            file_path = Path(ignore_list_path)
+        else:
+            file_path = Path(self._get_query_specific_ignore_list_path(query))
+        
+        # If file doesn't exist, return empty set
+        if not file_path.exists():
+            if query:  # Only log if we expected a file to exist
+                self.logger.debug(f"No ignore list found for query '{query}' at {file_path}")
+            return set()
+        
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                
+            # Extract video IDs from the ignore list format
+            video_ids = data.get('ignored_video_ids', [])
+            if video_ids:
+                ignored_ids = set(str(vid).strip() for vid in video_ids if vid and str(vid).strip())
+                self.logger.info(f"📂 Loaded {len(ignored_ids)} video IDs from query-specific ignore list: {file_path}")
+                return ignored_ids
+            else:
+                self.logger.debug(f"Ignore list file is empty: {file_path}")
+                return set()
+                
+        except (json.JSONDecodeError, KeyError, FileNotFoundError) as e:
+            self.logger.warning(f"Could not load ignore list from {file_path}: {e}")
+            return set()
+        except Exception as e:
+            self.logger.error(f"Error loading ignore list from {file_path}: {e}")
+            return set()
+
+    def _get_query_specific_ignore_list_path(self, query: str) -> str:
+        """
+        Generate a query-specific ignore list path based on the query.
+        
+        Args:
+            query: Search query string
+            
+        Returns:
+            Path to the query-specific ignore list file
+        """
+        # Clean the query using the same logic as add_to_ignore_list.py
+        clean_query = re.sub(r'[^\w\s-]', '', query)  # Remove special characters except spaces and hyphens
+        clean_query = re.sub(r'[-\s]+', '_', clean_query)  # Replace spaces and hyphens with underscores
+        clean_query = clean_query.lower().strip('_')  # Lowercase and remove leading/trailing underscores
+        
+        if not clean_query:
+            clean_query = 'unknown_query'
+        
+        # Ensure ignore_list directory exists
+        ignore_list_dir = Path("ignore_list")
+        ignore_list_dir.mkdir(exist_ok=True)
+        
+        return str(ignore_list_dir / f"{clean_query}_ignore_list.json")
+
+    def load_existing_video_ids(self, query_dir: Path) -> set:
+        """
+        Load video IDs from existing files and metadata to prevent duplicates.
+        
+        Args:
+            query_dir: Directory to check for existing videos
+            
+        Returns:
+            Set of existing video IDs
+        """
+        existing_ids = set()
+        
+        # Method 1: Load from metadata file if it exists
+        metadata_file = query_dir / "query_metadata.json"
+        if metadata_file.exists():
+            try:
+                with open(metadata_file, 'r', encoding='utf-8') as f:
+                    metadata = json.load(f)
+                    video_mappings = metadata.get("video_file_mappings", {})
+                    for video_id in video_mappings.keys():
+                        existing_ids.add(str(video_id))
+                        
+                self.logger.debug(f"Loaded {len(existing_ids)} video IDs from metadata file")
+            except (json.JSONDecodeError, KeyError, FileNotFoundError) as e:
+                self.logger.warning(f"Could not load video IDs from metadata: {e}")
+        
+        # Method 2: Try to extract video IDs from existing filenames
+        if query_dir.exists():
+            video_extensions = ['*.mp4', '*.mov', '*.webm', '*.avi', '*.mkv']
+            existing_files = []
+            for ext in video_extensions:
+                existing_files.extend(query_dir.glob(ext))
+            
+            filename_extracted_ids = set()
+            for file_path in existing_files:
+                filename = file_path.stem  # Get filename without extension
+                
+                # Try to extract Adobe Stock video ID from filename
+                # Pattern 1: Filename ending with _VIDEOID
+                id_match = re.search(r'_(\d{8,})$', filename)
+                if id_match:
+                    video_id = id_match.group(1)
+                    filename_extracted_ids.add(video_id)
+                    continue
+                
+                # Pattern 2: Filename starting with VIDEOID_
+                id_match = re.search(r'^(\d{8,})_', filename)
+                if id_match:
+                    video_id = id_match.group(1)
+                    filename_extracted_ids.add(video_id)
+                    continue
+                
+                # Pattern 3: Adobe_Stock_Video_VIDEOID
+                id_match = re.search(r'Adobe_Stock_Video_(\d{8,})', filename)
+                if id_match:
+                    video_id = id_match.group(1)
+                    filename_extracted_ids.add(video_id)
+                    continue
+            
+            if filename_extracted_ids:
+                self.logger.debug(f"Extracted {len(filename_extracted_ids)} video IDs from existing filenames")
+                existing_ids.update(filename_extracted_ids)
+        
+        # Update global tracking
+        self.existing_video_ids.update(existing_ids)
+        self.global_seen_video_ids.update(existing_ids)
+        
+        return existing_ids
+
+    def is_duplicate_video(self, video_data: Dict, add_to_tracking: bool = False) -> bool:
+        """
+        Check if a video is a duplicate based on ID or if it's in the ignore list.
+        
+        Args:
+            video_data: Video data dictionary
+            add_to_tracking: Whether to add the video ID to global tracking if not duplicate
+            
+        Returns:
+            True if video is a duplicate or should be ignored, False otherwise
+        """
+        video_id = video_data.get('id')
+        if not video_id:
+            return False
+        
+        video_id = str(video_id)
+        
+        # Check against all ignore lists (only if ignore list functionality is enabled)
+        if self.use_ignore_list and video_id in self.current_ignored_video_ids:
+            self.logger.debug(f"Video {video_id} is in ignore list - skipping (title: {video_data.get('title', 'N/A')})")
+            return True
+        
+        # Check against global seen video IDs
+        if video_id in self.global_seen_video_ids:
+            self.logger.debug(f"Duplicate video detected: {video_id} (title: {video_data.get('title', 'N/A')})")
+            return True
+        
+        # Add to global tracking only if requested
+        if add_to_tracking:
+            self.global_seen_video_ids.add(video_id)
+        
+        return False
 
     def authenticate_with_browser(self) -> bool:
         """
@@ -247,7 +928,7 @@ class AdobeStockScraper:
             
             self.session.cookies.update(cookies)
             self.authenticated = True
-            self.logger.info(f"Loaded {len(cookies)} cookies from file")
+            self.logger.debug(f"Loaded {len(cookies)} cookies from file")
             return True
             
         except Exception as e:
@@ -268,7 +949,7 @@ class AdobeStockScraper:
             with open(self.cookies_file, 'w') as f:
                 json.dump(cookies, f, indent=2)
             
-            self.logger.info(f"Saved {len(cookies)} cookies to {self.cookies_file}")
+            self.logger.debug(f"Saved {len(cookies)} cookies to {self.cookies_file}")
             return True
             
         except Exception as e:
@@ -314,19 +995,29 @@ class AdobeStockScraper:
         # Check title exclusion patterns
         for pattern in self.exclude_title_patterns:
             if pattern.lower() in title:
-                self.logger.info(f"Filtering out video '{video_data.get('title', '')}' - matches exclusion pattern: '{pattern}'")
+                self.logger.debug(f"Filtering out video '{video_data.get('title', '')}' - matches exclusion pattern: '{pattern}'")
                 return True
         
         # Check duration if available (Note: Adobe Stock may not provide duration in search results)
         duration = video_data.get('duration_seconds')
+        
+        # If duration filtering is requested but no duration data is available, warn user
+        if (self.max_duration_seconds or self.min_duration_seconds) and duration is None:
+            # Only log this warning once per session to avoid spam
+            if not hasattr(self, '_duration_warning_logged'):
+                self.logger.warning("Duration filtering requested but Adobe Stock search results don't include duration information.")
+                self.logger.warning("Videos may exceed your specified duration limits. Consider using a different approach to filter by duration.")
+                self._duration_warning_logged = True
+            return False  # Don't filter out videos without duration info
+        
         if duration:
             # Maximum duration filter
             if self.max_duration_seconds and duration > self.max_duration_seconds:
-                self.logger.info(f"Filtering out video '{video_data.get('title', '')}' - duration {duration}s exceeds limit of {self.max_duration_seconds}s")
+                self.logger.debug(f"Filtering out video '{video_data.get('title', '')}' - duration {duration}s exceeds limit of {self.max_duration_seconds}s")
                 return True
             # Minimum duration filter
             if self.min_duration_seconds and duration < self.min_duration_seconds:
-                self.logger.info(f"Filtering out video '{video_data.get('title', '')}' - duration {duration}s below minimum of {self.min_duration_seconds}s")
+                self.logger.debug(f"Filtering out video '{video_data.get('title', '')}' - duration {duration}s below minimum of {self.min_duration_seconds}s")
                 return True
         
         return False
@@ -343,13 +1034,37 @@ class AdobeStockScraper:
             List of video data dictionaries
         """
         videos = []
-        seen_video_ids = set()  # Track video IDs to avoid duplicates
+        seen_video_ids = set()  # Track video IDs to avoid duplicates within this search
         page = 1
-        max_pages = 10  # Limit to prevent infinite loops
+        
+        # Calculate ignore list impact and adjust search parameters accordingly
+        ignore_list_size = len(self.current_ignored_video_ids) if self.use_ignore_list else 0
+        
+        # Base search parameters
+        base_max_pages = 10
+        base_consecutive_empty_limit = 3
+        
+        # Adjust search parameters based on ignore list size
+        if ignore_list_size > 0:
+            # Calculate expected hit rate (assume 10-20% of videos might be ignored in heavy use)
+            ignore_ratio_estimate = min(ignore_list_size / 1000, 0.5)  # Cap at 50% estimated ignore ratio
+            search_multiplier = max(1.5, 1 + (ignore_ratio_estimate * 3))  # Scale search effort
+            
+            max_pages = int(base_max_pages * search_multiplier)
+            consecutive_empty_limit = int(base_consecutive_empty_limit * search_multiplier)
+            
+            self.logger.info(f"🚫 Ignore list contains {ignore_list_size} video IDs")
+            self.logger.info(f"📈 Expanding search: max_pages={max_pages}, consecutive_empty_limit={consecutive_empty_limit}")
+        else:
+            max_pages = base_max_pages
+            consecutive_empty_limit = base_consecutive_empty_limit
+        
         consecutive_empty_pages = 0  # Track empty pages to stop early
         
-        while len(videos) < limit and page <= max_pages and consecutive_empty_pages < 3:
-            self.logger.info(f"Searching page {page} for query: '{query}'")
+        self.logger.debug(f"Starting search with {len(self.global_seen_video_ids)} previously seen video IDs")
+        
+        while len(videos) < limit and page <= max_pages and consecutive_empty_pages < consecutive_empty_limit:
+            self.logger.debug(f"Searching page {page} for query: '{query}' (need {limit - len(videos)} more videos)")
             
             # Use only the working Adobe Stock URL pattern
             search_urls = [
@@ -374,48 +1089,126 @@ class AdobeStockScraper:
                     response = self.session.get(url, params=params, timeout=30)
                     response.raise_for_status()
                     
-                    self.logger.info(f"Got response from {url}, status: {response.status_code}")
+                    self.logger.debug(f"Got response from {url}, status: {response.status_code}")
                     
                     # Look for JSON data in the page
                     page_videos = self._extract_video_data(response.text)
                     
                     if page_videos:
-                        self.logger.info(f"Found {len(page_videos)} videos using {url}")
+                        self.logger.debug(f"Found {len(page_videos)} videos using {url}")
+                        # Debug: Log the first few video IDs found
+                        if page_videos:
+                            sample_ids = [v.get('id', 'no-id') for v in page_videos[:3]]
+                            self.logger.debug(f"Sample video IDs from extraction: {sample_ids}")
                         break
                     else:
-                        self.logger.warning(f"No videos found using {url}")
+                        self.logger.debug(f"No videos found using {url}")
                         
                 except requests.RequestException as e:
                     self.logger.error(f"Error with {url}: {e}")
                     continue
             
             if not page_videos:
-                self.logger.warning(f"No videos found on page {page}")
+                self.logger.debug(f"No videos found on page {page}")
                 consecutive_empty_pages += 1
             else:
                 consecutive_empty_pages = 0
                 
-                # Filter out duplicates and add new videos
+                # Enhanced duplicate filtering with multiple checks
                 new_videos = []
+                duplicates_filtered = 0
+                invalid_videos_filtered = 0
+                ignored_videos_filtered = 0
+                
+                # Debug: Log current tracking state
+                self.logger.debug(f"Before processing page {page}: global_seen_video_ids has {len(self.global_seen_video_ids)} IDs")
+                if len(self.global_seen_video_ids) <= 10:
+                    self.logger.debug(f"Current global_seen_video_ids: {list(self.global_seen_video_ids)}")
+                
                 for video in page_videos:
                     video_id = video.get('id')
-                    if video_id and video_id not in seen_video_ids:
-                        seen_video_ids.add(video_id)
-                        new_videos.append(video)
+                    
+                    # Skip videos without valid IDs
+                    if not video_id or not str(video_id).strip():
+                        invalid_videos_filtered += 1
+                        continue
+                    
+                    video_id = str(video_id).strip()
+                    
+                    # Debug: Log checking process for first few videos
+                    if len(new_videos) < 3:
+                        self.logger.debug(f"Checking video {video_id}: in seen_video_ids={video_id in seen_video_ids}, in global_seen_video_ids={video_id in self.global_seen_video_ids}, in ignore_list={video_id in self.current_ignored_video_ids if self.use_ignore_list else False}")
+                    
+                    # Check against ignore list first (if enabled)
+                    if self.use_ignore_list and video_id in self.current_ignored_video_ids:
+                        ignored_videos_filtered += 1
+                        if len(new_videos) < 3:  # Debug first few
+                            self.logger.debug(f"Video {video_id} is in ignore list - skipping")
+                        continue
+                    
+                    # Check against multiple duplicate sources:
+                    # 1. Current search session duplicates
+                    # 2. Global seen video IDs (includes existing files)
+                    if video_id in seen_video_ids:
+                        duplicates_filtered += 1
+                        self.logger.debug(f"Duplicate in current search: {video_id}")
+                        continue
+                    
+                    if video_id in self.global_seen_video_ids:
+                        duplicates_filtered += 1
+                        if len(new_videos) < 3:  # Debug first few
+                            self.logger.debug(f"Video {video_id} already in global_seen_video_ids - marking as duplicate")
+                        continue
+                    
+                    # Add to tracking sets - this is the single point where we add to global tracking
+                    seen_video_ids.add(video_id)
+                    self.global_seen_video_ids.add(video_id)
+                    
+                    # Add video to results
+                    new_videos.append(video)
                 
                 videos.extend(new_videos)
-                self.logger.info(f"Found {len(new_videos)} new unique videos on page {page} ({len(page_videos) - len(new_videos)} duplicates filtered)")
+                
+                # Enhanced logging
+                total_filtered = duplicates_filtered + invalid_videos_filtered + ignored_videos_filtered
+                if total_filtered > 0:
+                    filter_details = []
+                    if duplicates_filtered > 0:
+                        filter_details.append(f"{duplicates_filtered} duplicates")
+                    if invalid_videos_filtered > 0:
+                        filter_details.append(f"{invalid_videos_filtered} invalid")
+                    if ignored_videos_filtered > 0:
+                        filter_details.append(f"{ignored_videos_filtered} ignored")
+                    
+                    self.logger.debug(f"Page {page}: Found {len(new_videos)} new unique videos, filtered {', '.join(filter_details)}")
+                else:
+                    self.logger.debug(f"Page {page}: Found {len(new_videos)} new unique videos")
+                
+                # Special handling when ignore list is large
+                if ignored_videos_filtered > 0:
+                    self.logger.debug(f"🚫 Skipped {ignored_videos_filtered} videos from ignore list on page {page}")
                 
                 # If we got no new videos on this page, it might mean we've seen them all
                 if len(new_videos) == 0:
                     consecutive_empty_pages += 1
+                    self.logger.debug(f"No new videos on page {page} - all were duplicates, invalid, or ignored")
             
             page += 1
             time.sleep(self.delay)  # Rate limiting
         
-        if len(videos) < limit:
-            self.logger.warning(f"Only found {len(videos)} unique videos out of requested {limit}. Adobe Stock may not have enough unique results for this query.")
+        # Enhanced completion logging
+        completion_msg = f"Search complete: {len(videos)} unique videos found"
+        if ignore_list_size > 0:
+            completion_msg += f" (ignore list: {ignore_list_size} IDs)"
+        completion_msg += f", {len(self.global_seen_video_ids)} total video IDs tracked"
         
+        if len(videos) < limit:
+            if ignore_list_size > 0:
+                self.logger.info(f"⚠️  Found {len(videos)}/{limit} videos. Large ignore list ({ignore_list_size} IDs) may have limited available results.")
+            else:
+                self.logger.debug(f"Only found {len(videos)} unique videos out of requested {limit}. Adobe Stock may not have enough unique results for this query.")
+        
+        self.logger.debug(completion_msg)
         return videos[:limit]
 
     def _extract_video_data(self, html_content: str) -> List[Dict]:
@@ -539,15 +1332,17 @@ class AdobeStockScraper:
                 }
                 videos.append(video_info)
         
-        # Remove duplicates by video_id
-        seen_ids = set()
+        # Local duplicate check within this extraction only (don't modify global tracking here)
         unique_videos = []
+        seen_ids_in_extraction = set()
+        
         for video in videos:
-            if video['id'] not in seen_ids:
-                seen_ids.add(video['id'])
+            video_id = video.get('id')
+            if video_id and video_id not in seen_ids_in_extraction:
+                seen_ids_in_extraction.add(video_id)
                 unique_videos.append(video)
         
-        self.logger.info(f"Found {len(unique_videos)} unique videos from JavaScript parsing")
+        self.logger.debug(f"JavaScript extraction: Found {len(unique_videos)} unique videos from {len(videos)} total matches")
         return unique_videos
 
     def _extract_video_ids_and_titles_from_html(self, html_content: str) -> List[Dict]:
@@ -601,7 +1396,7 @@ class AdobeStockScraper:
                         seen_ids.add(video_data['id'])
                         videos.append(video_data)
             
-            self.logger.info(f"Found {len(videos)} unique videos with titles from HTML parsing")
+            self.logger.debug(f"Found {len(videos)} unique videos with titles from HTML parsing")
             
         except Exception as e:
             self.logger.error(f"Error in HTML parsing for video titles: {e}")
@@ -797,7 +1592,7 @@ class AdobeStockScraper:
                 if len(match) >= 8 and match.isdigit():
                     video_ids.add(match)
         
-        self.logger.info(f"Found {len(video_ids)} unique video IDs in HTML")
+        self.logger.debug(f"Found {len(video_ids)} unique video IDs in HTML")
         return list(video_ids)
 
     def _parse_json_data(self, data: dict) -> List[Dict]:
@@ -1011,7 +1806,7 @@ class AdobeStockScraper:
                         videos.append(video_data)
             
             if videos:
-                self.logger.info(f"BeautifulSoup found {len(videos)} videos")
+                self.logger.debug(f"BeautifulSoup found {len(videos)} videos")
             
         except Exception as e:
             self.logger.error(f"Error in BeautifulSoup parsing: {e}")
@@ -1166,9 +1961,194 @@ class AdobeStockScraper:
             videos.append(video_info)
         
         if videos:
-            self.logger.info(f"Regex extraction found {len(videos)} video IDs")
+            self.logger.debug(f"Regex extraction found {len(videos)} video IDs")
         
         return videos[:20]  # Limit fallback results
+
+    def get_video_duration_with_ffprobe(self, video_url: str) -> Optional[int]:
+        """
+        Try to get video duration using ffprobe (if available).
+        This is more accurate than file size estimation.
+        
+        Args:
+            video_url: URL of the video
+            
+        Returns:
+            Duration in seconds, or None if not available
+        """
+        try:
+            import subprocess
+            import json
+            
+            self.logger.info(f"Using ffprobe to get duration for video URL")
+            
+            # Try to run ffprobe on the URL directly
+            cmd = [
+                'ffprobe', 
+                '-v', 'quiet',
+                '-print_format', 'json',
+                '-show_format',
+                '-show_streams',
+                '-user_agent', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                video_url
+            ]
+            
+            self.logger.debug(f"Running ffprobe command: {' '.join(cmd)}")
+            
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=45)
+            
+            if result.returncode == 0:
+                probe_data = json.loads(result.stdout)
+                self.logger.debug(f"ffprobe succeeded, parsing JSON data")
+                
+                # Look for duration in format info first
+                if 'format' in probe_data and 'duration' in probe_data['format']:
+                    duration = float(probe_data['format']['duration'])
+                    duration_int = int(duration)
+                    self.logger.info(f"ffprobe found duration in format: {duration_int} seconds")
+                    return duration_int
+                
+                # If not in format, look in video streams
+                if 'streams' in probe_data:
+                    for stream in probe_data['streams']:
+                        if stream.get('codec_type') == 'video' and 'duration' in stream:
+                            duration = float(stream['duration'])
+                            duration_int = int(duration)
+                            self.logger.info(f"ffprobe found duration in video stream: {duration_int} seconds")
+                            return duration_int
+                
+                self.logger.warning("ffprobe succeeded but no duration found in output")
+            else:
+                self.logger.warning(f"ffprobe failed with return code {result.returncode}")
+                if result.stderr:
+                    self.logger.debug(f"ffprobe stderr: {result.stderr}")
+                            
+        except subprocess.TimeoutExpired:
+            self.logger.warning("ffprobe timed out after 45 seconds")
+        except (ImportError, subprocess.CalledProcessError, FileNotFoundError) as e:
+            self.logger.warning(f"ffprobe not available or failed: {e}")
+        except json.JSONDecodeError as e:
+            self.logger.warning(f"ffprobe returned invalid JSON: {e}")
+        except Exception as e:
+            self.logger.warning(f"Unexpected error with ffprobe: {e}")
+        
+        return None
+
+    def get_video_duration_from_partial_download(self, video_url: str, video_id: str) -> Optional[int]:
+        """
+        Download a small portion of the video to check its duration with ffprobe.
+        This is more reliable than trying to probe the URL directly.
+        
+        Args:
+            video_url: URL of the video
+            video_id: Video ID for temporary file naming
+            
+        Returns:
+            Duration in seconds, or None if not available
+        """
+        import tempfile
+        import subprocess
+        import json
+        
+        # Create a temporary file for the partial download
+        temp_file = None
+        try:
+            # Download first 2MB to get enough metadata
+            headers = {'Range': 'bytes=0-2097151'}  # First 2MB
+            response = self.session.get(video_url, headers=headers, timeout=30, stream=True)
+            
+            if response.status_code in [200, 206]:  # Success or partial content
+                # Create temporary file
+                with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as temp_file:
+                    temp_filename = temp_file.name
+                    
+                    # Write the partial content
+                    for chunk in response.iter_content(chunk_size=8192):
+                        if chunk:
+                            temp_file.write(chunk)
+                
+                self.logger.info(f"Downloaded partial video ({len(response.content) if hasattr(response, 'content') else 'unknown'} bytes) for duration check")
+                
+                # Use ffprobe on the temporary file
+                cmd = [
+                    'ffprobe', 
+                    '-v', 'quiet',
+                    '-print_format', 'json',
+                    '-show_format',
+                    temp_filename
+                ]
+                
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+                
+                if result.returncode == 0:
+                    probe_data = json.loads(result.stdout)
+                    
+                    if 'format' in probe_data and 'duration' in probe_data['format']:
+                        duration = float(probe_data['format']['duration'])
+                        duration_int = int(duration)
+                        self.logger.info(f"ffprobe found duration from partial download: {duration_int} seconds")
+                        return duration_int
+                else:
+                    self.logger.debug(f"ffprobe failed on partial download: {result.stderr}")
+                    
+        except Exception as e:
+            self.logger.debug(f"Could not get duration from partial download: {e}")
+        finally:
+            # Clean up temporary file
+            if temp_file and hasattr(temp_file, 'name'):
+                try:
+                    import os
+                    os.unlink(temp_filename)
+                except:
+                    pass
+        
+        return None
+
+    def get_video_duration_from_url(self, video_url: str, video_id: str = None) -> Optional[int]:
+        """
+        Try to get video duration from URL metadata without downloading the full video.
+        
+        Args:
+            video_url: URL of the video
+            video_id: Video ID for temporary file naming
+            
+        Returns:
+            Duration in seconds, or None if not available
+        """
+        # First try ffprobe directly on URL (usually won't work for Adobe Stock)
+        duration = self.get_video_duration_with_ffprobe(video_url)
+        if duration:
+            return duration
+        
+        # If that fails, try partial download + ffprobe (more reliable)
+        if video_id:
+            duration = self.get_video_duration_from_partial_download(video_url, video_id)
+            if duration:
+                return duration
+        
+        # Fallback to file size estimation (improved version)
+        try:
+            headers = {'Range': 'bytes=0-8192'}  # Get first 8KB to read metadata
+            response = self.session.get(video_url, headers=headers, timeout=10, stream=True)
+            
+            if response.status_code in [200, 206]:  # Success or partial content
+                content_length = response.headers.get('content-length')
+                if content_length:
+                    file_size_mb = int(content_length) / (1024 * 1024)
+                    estimated_duration = int(file_size_mb / 0.8)  # ~0.8MB per second for HD video
+                    
+                    self.logger.info(f"File size: {file_size_mb:.1f}MB, estimated duration: {estimated_duration}s")
+                    
+                    if 1 <= estimated_duration <= 600:
+                        self.logger.info(f"Using file size estimation: {estimated_duration}s (based on {file_size_mb:.1f}MB at ~0.8MB/sec)")
+                        return estimated_duration
+                    else:
+                        self.logger.warning(f"File size estimation seems unrealistic: {estimated_duration}s from {file_size_mb:.1f}MB - skipping estimation")
+                    
+        except Exception as e:
+            self.logger.debug(f"Could not get duration from URL metadata: {e}")
+        
+        return None
 
     def download_video(self, video_data: Dict, filename: Optional[str] = None, query_prefix: Optional[str] = None, index: Optional[int] = None) -> Tuple[bool, Optional[str]]:
         """
@@ -1189,13 +2169,47 @@ class AdobeStockScraper:
             self.logger.warning("No video ID found in video data")
             return False, None
         
+        video_id = str(video_id).strip()
+        
+        # Check ignore list first - skip early if video should be ignored (only if ignore list functionality is enabled)
+        if self.use_ignore_list and video_id in self.current_ignored_video_ids:
+            print(f"🚫 Skipping {video_id} (in ignore list)")
+            return False, None
+        
+        # Enhanced duplicate checking - check if video ID already exists
+        if video_id in self.existing_video_ids:
+            print(f"🔄 Skipping {video_id} (already exists)")
+            return False, None
+        
+        # Check if we've processed this video ID in current session
+        if video_id in self.global_seen_video_ids and video_id not in self.existing_video_ids:
+            # This means we've seen it in current session but it's not in existing files
+            # This could happen if it was filtered out earlier, so we can try again
+            self.logger.debug(f"Video {video_id} seen in current session but not in existing files, proceeding...")
+        
         # Use watermarked download URL - prioritize comp_url if it exists, otherwise construct it
         download_url = video_data.get('comp_url') or video_data.get('preview_url')
         
         # If no URL is provided or it doesn't match the watermarked pattern, construct it
         if not download_url or 'Download/Watermarked/' not in download_url:
             download_url = f'https://stock.adobe.com/Download/Watermarked/{video_id}'
-            self.logger.info(f"Constructed watermarked download URL: {download_url}")
+            self.logger.debug(f"Constructed watermarked download URL: {download_url}")
+        
+        # Check if duration filtering is enabled
+        duration_filtering_enabled = bool(self.max_duration_seconds or self.min_duration_seconds)
+        current_duration = video_data.get('duration_seconds')
+        
+        self.logger.debug(f"Video {video_id}: current_duration = {current_duration}, max_duration_seconds = {self.max_duration_seconds}, min_duration_seconds = {self.min_duration_seconds}")
+        
+        # If we already have duration info from search results, check it now
+        if current_duration is not None and duration_filtering_enabled:
+            if self.max_duration_seconds and current_duration > self.max_duration_seconds:
+                print(f"🚫 Skipping {video_id} (duration {current_duration}s > {self.max_duration_seconds}s)")
+                return False, None
+            if self.min_duration_seconds and current_duration < self.min_duration_seconds:
+                print(f"🚫 Skipping {video_id} (duration {current_duration}s < {self.min_duration_seconds}s)")
+                return False, None
+            self.logger.debug(f"✅ Video {video_id} duration {current_duration}s - within acceptable range")
         
         # Create filename
         if not filename:
@@ -1227,13 +2241,55 @@ class AdobeStockScraper:
         
         filepath = self.download_dir / filename
         
-        # Skip if file already exists
+        # Enhanced file existence check - both filename and video ID based
         if filepath.exists():
-            self.logger.info(f"File {filename} already exists, skipping...")
+            self.logger.debug(f"File {filename} already exists, skipping...")
+            # Add to existing video IDs if not already there
+            self.existing_video_ids.add(video_id)
             return True, filename
         
+        # Check if any file with this video ID already exists (different filename)
+        video_extensions = ['*.mp4', '*.mov', '*.webm', '*.avi', '*.mkv']
+        existing_files = []
+        for ext in video_extensions:
+            existing_files.extend(self.download_dir.glob(ext))
+        
+        for existing_file in existing_files:
+            existing_filename = existing_file.stem
+            # Check if existing file contains this video ID
+            if video_id in existing_filename:
+                print(f"🔄 Skipping {video_id} (exists as {existing_file.name})")
+                self.existing_video_ids.add(video_id)
+                return True, existing_file.name
+
+        # Show video processing status
+        video_title = video_data.get('title', f'Video_{video_id}')
+        if len(video_title) > 80:
+            video_title = video_title[:77] + "..."
+        print(f"📥 Downloading: {video_title}")
+
         try:
-            self.logger.info(f"Downloading {filename} from {download_url}")
+            # Check file size before downloading if max_size_bytes is set
+            if self.max_size_bytes:
+                try:
+                    # Send HEAD request to get Content-Length without downloading
+                    head_response = self.session.head(download_url, timeout=10)
+                    content_length = head_response.headers.get('content-length')
+                    
+                    if content_length:
+                        file_size_bytes = int(content_length)
+                        if file_size_bytes > self.max_size_bytes:
+                            size_mb = file_size_bytes / (1024 * 1024)
+                            max_size_mb = self.max_size_bytes / (1024 * 1024)
+                            print(f"🚫 Skipping {video_id} (size {size_mb:.1f}MB > {max_size_mb:.1f}MB)")
+                            return False, None
+                        else:
+                            size_mb = file_size_bytes / (1024 * 1024)
+                            max_size_mb = self.max_size_bytes / (1024 * 1024)
+                            self.logger.debug(f"✅ Video {video_id} file size {size_mb:.1f}MB - within limit of {max_size_mb:.1f}MB")
+
+                except Exception as e:
+                    self.logger.debug(f"⚠️ Error checking file size for {video_id}: {e} - proceeding with download")
             
             # Use the session with proper headers for Adobe Stock
             response = self.session.get(download_url, stream=True, timeout=60)
@@ -1242,13 +2298,35 @@ class AdobeStockScraper:
             # Check if we got a valid video file
             content_type = response.headers.get('content-type', '').lower()
             if 'video' not in content_type and 'application/octet-stream' not in content_type:
-                self.logger.warning(f"Unexpected content type for {filename}: {content_type}")
+                self.logger.debug(f"Unexpected content type for {filename}: {content_type}")
                 # Continue anyway as Adobe Stock might return different content types
             
+            # Double-check file size during download if we couldn't check it beforehand
+            if self.max_size_bytes:
+                content_length = response.headers.get('content-length')
+                if content_length:
+                    file_size_bytes = int(content_length)
+                    if file_size_bytes > self.max_size_bytes:
+                        size_mb = file_size_bytes / (1024 * 1024)
+                        max_size_mb = self.max_size_bytes / (1024 * 1024)
+                        print(f"🚫 Skipping {video_id} (size {size_mb:.1f}MB > {max_size_mb:.1f}MB)")
+                        return False, None
+            
+            downloaded_bytes = 0
             with open(filepath, 'wb') as f:
                 for chunk in response.iter_content(chunk_size=8192):
                     if chunk:
                         f.write(chunk)
+                        downloaded_bytes += len(chunk)
+                        
+                        # Check downloaded size if max_size_bytes is set
+                        if self.max_size_bytes and downloaded_bytes > self.max_size_bytes:
+                            size_mb = downloaded_bytes / (1024 * 1024)
+                            max_size_mb = self.max_size_bytes / (1024 * 1024)
+                            print(f"🚫 Skipping {video_id} (size {size_mb:.1f}MB > {max_size_mb:.1f}MB)")
+                            # Remove the partially downloaded file
+                            filepath.unlink()
+                            return False, None
             
             # Check if the downloaded file has a reasonable size
             file_size = filepath.stat().st_size
@@ -1256,74 +2334,145 @@ class AdobeStockScraper:
                 self.logger.warning(f"Downloaded file {filename} is very small ({file_size} bytes) - might be an error page")
                 # Don't delete automatically, let the user decide
             
-            self.logger.info(f"Successfully downloaded {filename} ({file_size} bytes)")
+            # Add to existing video IDs tracking
+            self.existing_video_ids.add(video_id)
+            
+            # Now check duration if filtering is enabled and we don't have duration info yet
+            if duration_filtering_enabled and current_duration is None:
+                self.logger.debug(f"Checking duration of downloaded video {video_id} with ffprobe...")
+                actual_duration = self.get_video_duration_from_file(filepath)
+                
+                if actual_duration:
+                    self.logger.debug(f"ffprobe found duration: {actual_duration} seconds")
+                    
+                    # Check if duration is within limits
+                    duration_ok = True
+                    if self.max_duration_seconds and actual_duration > self.max_duration_seconds:
+                        print(f"🚫 Removed {video_id} (duration {actual_duration}s > {self.max_duration_seconds}s)")
+                        duration_ok = False
+                    if self.min_duration_seconds and actual_duration < self.min_duration_seconds:
+                        print(f"🚫 Removed {video_id} (duration {actual_duration}s < {self.min_duration_seconds}s)")
+                        duration_ok = False
+                    
+                    if not duration_ok:
+                        # Delete the file and return failure
+                        filepath.unlink()
+                        # Remove from existing video IDs since we deleted it
+                        self.existing_video_ids.discard(video_id)
+                        return False, None
+                    else:
+                        self.logger.debug(f"✅ Video {video_id} duration {actual_duration}s - within acceptable range")
+                        # Update video data for future reference
+                        video_data['duration_seconds'] = actual_duration
+                else:
+                    self.logger.debug(f"⚠️ Could not determine duration for {filename} - keeping file anyway")
+            
+            # Show success message
+            file_size_mb = file_size / (1024 * 1024)
+            print(f"✅ Downloaded: {filename} ({file_size_mb:.1f}MB)")
+            
             return True, filename
             
         except requests.RequestException as e:
-            self.logger.error(f"Error downloading {filename}: {e}")
+            print(f"❌ Error downloading {video_id}: {e}")
             if filepath.exists():
                 filepath.unlink()  # Remove partial file
             return False, None
 
-    def scrape_and_download(self, query: str, count: int = 10) -> int:
+    def get_video_duration_from_file(self, filepath) -> Optional[int]:
         """
-        Search for videos and download them or create JSON output.
+        Get video duration from a downloaded file using ffprobe.
         
         Args:
-            query: Search query string
-            count: Number of videos to download/include in JSON
+            filepath: Path to the video file
             
         Returns:
-            Number of successfully downloaded videos or videos in JSON output
+            Duration in seconds, or None if not available
         """
-        self.logger.info(f"Starting scrape for query: '{query}', count: {count}")
+        try:
+            import subprocess
+            import json
+            
+            cmd = [
+                'ffprobe', 
+                '-v', 'quiet',
+                '-print_format', 'json',
+                '-show_format',
+                str(filepath)
+            ]
+            
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+            
+            if result.returncode == 0:
+                probe_data = json.loads(result.stdout)
+                
+                if 'format' in probe_data and 'duration' in probe_data['format']:
+                    duration = float(probe_data['format']['duration'])
+                    return int(duration)
+                    
+        except Exception as e:
+            self.logger.debug(f"Could not get duration from file {filepath}: {e}")
         
-        # Check authentication if required
-        if self.use_auth:
-            if not self.authenticated:
-                self.logger.info("Authentication required but not completed. Starting browser login...")
-                if not self.authenticate_with_browser():
-                    self.logger.error("Authentication failed. Cannot proceed.")
-                    return 0
-            else:
-                # Verify existing authentication is still valid
-                if not self.is_authenticated():
-                    self.logger.info("Existing authentication expired. Starting browser login...")
-                    if not self.authenticate_with_browser():
-                        self.logger.error("Re-authentication failed. Cannot proceed.")
-                        return 0
+        return None
 
-        # If JSON output mode, handle differently
+    def scrape_and_download(self, query: str, count: int = 10) -> int:
+        """
+        Scrape and download videos for a given query.
+        
+        Args:
+            query: Search query string (or None for random mode)
+            count: Number of videos to download
+            
+        Returns:
+            Number of videos downloaded
+        """
+        # Handle random mode
+        if self.random_mode:
+            return self.scrape_random_videos(count)
+        
+        # Handle JSON output mode
         if self.json_output:
-            return self._handle_json_output_mode(query, count)
-
-        # Create a clean directory name from the query
-        clean_query = re.sub(r'[^\w\s-]', '', query)  # Remove special characters
-        clean_query = re.sub(r'[-\s]+', '_', clean_query)  # Replace spaces/hyphens with underscores
-        clean_query = clean_query.lower().strip('_')  # Lowercase and remove leading/trailing underscores
+            search_count = self.sample_from if self.sample_from and self.sample_from > count else count
+            return self._handle_json_output_mode(query, count, search_count)
         
-        # Create query-specific subdirectory
+        # Store original download directory
+        original_download_dir = self.download_dir
+        
+        # Create a subdirectory for this query
+        clean_query = re.sub(r'[^\w\s-]', '', query)
+        clean_query = re.sub(r'[-\s]+', '_', clean_query)
+        clean_query = clean_query.lower().strip('_')
+        
         query_dir = self.download_dir / clean_query
         query_dir.mkdir(exist_ok=True)
         
-        # Store original download directory and update to query-specific directory
-        original_download_dir = self.download_dir
+        # Update download directory to the query subdirectory
         self.download_dir = query_dir
         
-        # Create/update metadata file with query information
-        metadata_file = query_dir / "query_metadata.json"
+        # Prepare metadata
         metadata = {
-            "original_query": query,
-            "clean_query": clean_query,
-            "authenticated": self.authenticated,
-            "filtering_settings": {
+            "query": query,
+            "requested_count": count,
+            "created_at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+            "total_videos_downloaded": 0,
+            "search_parameters": {
                 "max_duration_seconds": self.max_duration_seconds,
                 "min_duration_seconds": self.min_duration_seconds,
-                "exclude_title_patterns": self.exclude_title_patterns
-            },
-            "created_at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
-            "last_updated": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+                "max_size_bytes": self.max_size_bytes,
+                "exclude_title_patterns": self.exclude_title_patterns,
+                "sample_from": self.sample_from,
+                "intended_label": self.intended_label
+            }
         }
+        
+        # Create metadata files
+        metadata_file = query_dir / "query_metadata.json"
+        
+        # Load existing video IDs to prevent duplicates
+        existing_video_ids = self.load_existing_video_ids(query_dir)
+        
+        # Count existing video files (exclude metadata files)
+        video_extensions = ['.mp4', '.mov', '.webm', '.avi', '.mkv']
         
         # Filter out metadata files
         existing_files = list(query_dir.glob("*.mp4")) + \
@@ -1337,7 +2486,7 @@ class AdobeStockScraper:
         existing_count = len(existing_files)
         
         if existing_count > 0:
-            self.logger.info(f"Found {existing_count} existing video files in directory")
+            print(f"Found {existing_count} existing videos")
         
         # Load existing metadata to preserve video file mappings
         existing_video_mappings = {}
@@ -1355,7 +2504,7 @@ class AdobeStockScraper:
         needed_count = count - existing_count if count > existing_count else 0
         
         if needed_count <= 0:
-            self.logger.info(f"Already have {existing_count} videos, no additional downloads needed")
+            print(f"Already have {existing_count} videos, no additional downloads needed")
             
             # Still update metadata file
             with open(query_dir / "query_metadata.js", 'w', encoding='utf-8') as f:
@@ -1368,25 +2517,56 @@ class AdobeStockScraper:
             
             return existing_count
         
-        self.logger.info(f"Need to download {needed_count} more videos")
-        self.logger.info(f"Created/updated metadata file: {query_dir / 'query_metadata.js'}")
-        self.logger.info(f"Created/updated metadata file: {metadata_file}")
-        self.logger.info(f"Downloads will be saved to: {query_dir}")
+        print(f"Need to download {needed_count} more videos")
+        print(f"Downloads will be saved to: {query_dir}")
 
         try:
-            # NEW LOGIC: Search iteratively until we have enough videos that pass filters
-            filtered_videos = []
-            all_videos_found = []
+            # MODIFIED LOGIC: Continue searching until target is reached
+            successful_downloads = 0
+            video_filename_mapping = {}
+            total_videos_processed = 0
             total_filtered_count = 0
             search_attempts = 0
-            max_search_attempts = 5
-            videos_per_attempt = needed_count * 2  # Start with 2x multiplier
             
-            while len(filtered_videos) < needed_count and search_attempts < max_search_attempts:
-                search_attempts += 1
-                current_search_limit = videos_per_attempt * search_attempts
+            # Calculate ignore list impact and adjust search parameters accordingly
+            ignore_list_size = len(self.current_ignored_video_ids) if self.use_ignore_list else 0
+            
+            # Base search parameters
+            base_max_attempts = 20
+            base_videos_per_attempt_multiplier = 3
+            
+            # Adjust search parameters based on ignore list size
+            if ignore_list_size > 0:
+                # For large ignore lists, be more aggressive in searching
+                ignore_ratio_estimate = min(ignore_list_size / 1000, 0.7)  # Cap at 70% estimated ignore ratio
+                search_multiplier = max(1.5, 1 + (ignore_ratio_estimate * 2))
                 
-                self.logger.info(f"Search attempt {search_attempts}: Looking for {current_search_limit} videos to find {needed_count} that pass filters")
+                max_search_attempts = int(base_max_attempts * search_multiplier)
+                videos_per_attempt_multiplier = max(base_videos_per_attempt_multiplier, base_videos_per_attempt_multiplier * search_multiplier)
+                
+                print(f"🚫 Ignore list contains {ignore_list_size} video IDs")
+                print(f"📈 Expanding search strategy: max_attempts={max_search_attempts}, search_multiplier={videos_per_attempt_multiplier:.1f}x")
+            else:
+                max_search_attempts = base_max_attempts
+                videos_per_attempt_multiplier = base_videos_per_attempt_multiplier
+            
+            videos_per_attempt = int(needed_count * videos_per_attempt_multiplier)  # Start with calculated multiplier for better odds
+            all_processed_video_ids = set()  # Track all video IDs we've already processed
+            
+            self.logger.debug(f"Starting search process with {len(self.global_seen_video_ids)} video IDs already tracked (including {len(existing_video_ids)} existing)")
+            
+            # Continue searching and downloading until we reach the target
+            while successful_downloads < needed_count and search_attempts < max_search_attempts:
+                search_attempts += 1
+                
+                # Calculate how many more videos we need
+                remaining_needed = needed_count - successful_downloads
+                current_search_limit = max(remaining_needed * int(videos_per_attempt_multiplier * 2), videos_per_attempt)  # Search for more than we need
+                
+                search_msg = f"Search attempt {search_attempts}: Need {remaining_needed} more videos, searching for {current_search_limit} candidates"
+                if ignore_list_size > 0:
+                    search_msg += f" (accounting for {ignore_list_size} ignored IDs)"
+                self.logger.debug(search_msg)
                 
                 # Search for videos
                 videos = self.search_videos(query, current_search_limit)
@@ -1395,81 +2575,91 @@ class AdobeStockScraper:
                     self.logger.warning("No videos found for the given query")
                     break
                 
-                # Filter out duplicates from previous searches
+                # Filter out videos we've already processed and existing videos
                 new_videos = []
-                existing_ids = {v.get('id') for v in all_videos_found}
                 for video in videos:
-                    if video.get('id') not in existing_ids:
+                    video_id = video.get('id')
+                    if (video_id and 
+                        video_id not in self.existing_video_ids and 
+                        video_id not in all_processed_video_ids):
                         new_videos.append(video)
-                        all_videos_found.append(video)
+                        all_processed_video_ids.add(video_id)  # Mark as processed
                 
                 if not new_videos:
-                    self.logger.info(f"No new videos found in search attempt {search_attempts}")
-                    break
+                    self.logger.debug(f"No new videos found in search attempt {search_attempts} - all were duplicates")
+                    videos_per_attempt = int(videos_per_attempt * 1.5)
+                    continue
                 
-                self.logger.info(f"Found {len(new_videos)} new videos in search attempt {search_attempts}")
-                
-                # Apply filtering to new videos and add to our filtered collection
+                # Apply title/pattern filtering
+                candidate_videos = []
                 attempt_filtered_count = 0
                 for video in new_videos:
                     if self.should_filter_video(video):
                         attempt_filtered_count += 1
                         total_filtered_count += 1
                         continue
-                    
-                    # Only add if we haven't reached our needed count yet
-                    if len(filtered_videos) < needed_count:
-                        filtered_videos.append(video)
+                    candidate_videos.append(video)
                 
                 if attempt_filtered_count > 0:
-                    self.logger.info(f"Filtered out {attempt_filtered_count} videos in search attempt {search_attempts}")
+                    self.logger.debug(f"Filtered out {attempt_filtered_count} videos based on title patterns in search attempt {search_attempts}")
                 
-                self.logger.info(f"Now have {len(filtered_videos)} videos that pass filters (need {needed_count})")
+                if not candidate_videos:
+                    self.logger.debug(f"No valid candidates after filtering in search attempt {search_attempts}")
+                    continue
                 
-                # If we have enough, we can stop searching
-                if len(filtered_videos) >= needed_count:
-                    break
+                if search_attempts == 1:
+                    print(f"Found {len(candidate_videos)} videos to process...")
                 
-                # Increase multiplier for next attempt if we're still short
-                videos_per_attempt = int(videos_per_attempt * 1.5)
-            
-            # Final logging
-            if total_filtered_count > 0:
-                self.logger.info(f"Total videos filtered out: {total_filtered_count}")
-            
-            if len(filtered_videos) < needed_count:
-                self.logger.warning(f"Could only find {len(filtered_videos)} videos that pass filters out of {needed_count} needed")
-            
-            self.logger.info(f"Processing {len(filtered_videos)} videos after filtering")
-            
-            # Download videos using title-based naming
-            successful_downloads = 0
-            video_filename_mapping = {}
-            
-            for video in filtered_videos:
-                if successful_downloads >= needed_count:
-                    break
+                # Try to download the candidate videos
+                attempt_downloads = 0
+                for i, video in enumerate(candidate_videos):
+                    if successful_downloads >= needed_count:
+                        break
                     
-                self.logger.info(f"Processing video {successful_downloads + 1}/{min(needed_count, len(filtered_videos))}: {video['title']}")
-                
-                # Use title-based naming (no longer passing query_prefix and index)
-                success, filename = self.download_video(video)
-                if success:
-                    successful_downloads += 1
-                    # Store the mapping between video ID and filename
-                    video_filename_mapping[video['id']] = {
-                        'filename': filename,
-                        'title': video['title'],
-                        'url': video.get('comp_url') or video.get('preview_url') or f'https://stock.adobe.com/Download/Watermarked/{video["id"]}',
-                        'download_timestamp': time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-                    }
-                
-                # Rate limiting between downloads
-                if successful_downloads < needed_count:
+                    total_videos_processed += 1
+                    
+                    # Try to download the video
+                    success, filename = self.download_video(video)
+                    if success:
+                        successful_downloads += 1
+                        attempt_downloads += 1
+                        # Store the mapping between video ID and filename
+                        video_filename_mapping[video['id']] = {
+                            'filename': filename,
+                            'title': video['title'],
+                            'url': video.get('comp_url') or video.get('preview_url') or f'https://stock.adobe.com/Download/Watermarked/{video["id"]}',
+                            'download_timestamp': time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+                            'search_attempt': search_attempts
+                        }
+                    
+                    # Rate limiting between downloads
                     time.sleep(self.delay)
+                
+                # If we got no successful downloads from this batch, increase the search multiplier
+                if attempt_downloads == 0:
+                    videos_per_attempt = int(videos_per_attempt * 2)
+                    self.logger.debug(f"No successful downloads in this attempt, increasing search multiplier to {videos_per_attempt}")
+                
+                # If we still need more videos, continue searching
+                if successful_downloads < needed_count:
+                    remaining = needed_count - successful_downloads
+                    if search_attempts < max_search_attempts:
+                        self.logger.debug(f"Still need {remaining} more videos, continuing search...")
+                        time.sleep(self.delay)  # Rate limiting between search attempts
             
             total_files = existing_count + successful_downloads
-            self.logger.info(f"Download complete. {successful_downloads} new videos downloaded. Total: {total_files}/{count}")
+            print(f"Download complete: {successful_downloads} new videos downloaded, {total_files} total")
+            
+            if successful_downloads < needed_count:
+                remaining = needed_count - successful_downloads
+                warning_msg = f"Warning: Could not download all requested videos. Missing {remaining} videos."
+                if ignore_list_size > 0:
+                    warning_msg += f"\n         Large ignore list ({ignore_list_size} IDs) may have limited available unique results."
+                print(warning_msg)
+                if self.max_size_bytes is not None:
+                    print(f"Consider increasing max_size_bytes (currently {self.max_size_bytes / (1024*1024):.1f}MB)")
+                if self.max_duration_seconds or self.min_duration_seconds:
+                    print(f"Consider adjusting duration filters (currently {self.min_duration_seconds}-{self.max_duration_seconds}s)")
             
             # Update metadata with download completion info and video mappings
             try:
@@ -1478,10 +2668,12 @@ class AdobeStockScraper:
                 metadata["last_download_session"] = {
                     "requested_count": count,
                     "new_downloads": successful_downloads,
-                    "videos_found": len(all_videos_found),
+                    "videos_processed": total_videos_processed,
                     "videos_filtered_out": total_filtered_count,
-                    "videos_processed": len(filtered_videos),
                     "search_attempts": search_attempts,
+                    "existing_videos_at_start": len(existing_video_ids),
+                    "ignore_list_size": ignore_list_size,
+                    "max_search_attempts_reached": search_attempts >= max_search_attempts,
                     "session_timestamp": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
                 }
                 
@@ -1496,7 +2688,7 @@ class AdobeStockScraper:
                 with open(metadata_file, 'w', encoding='utf-8') as f:
                     json.dump(metadata, f, indent=2, ensure_ascii=False)
                 
-                self.logger.info(f"Updated metadata with {len(video_filename_mapping)} video file mappings")
+                self.logger.debug(f"Updated metadata with {len(video_filename_mapping)} new video file mappings")
             except Exception as e:
                 self.logger.warning(f"Failed to update metadata file: {e}")
             
@@ -1506,33 +2698,96 @@ class AdobeStockScraper:
             # Restore original download directory
             self.download_dir = original_download_dir
 
-    def _handle_json_output_mode(self, query: str, count: int) -> int:
+    def _handle_json_output_mode(self, query: str, count: int, search_count: int) -> int:
         """
         Handle JSON output mode - search for videos and create JSON instead of downloading.
         
         Args:
             query: Search query string
             count: Number of videos to include in JSON
+            search_count: Number of videos to search for (may be different from count due to sampling)
             
         Returns:
             Number of videos processed for JSON output
         """
-        self.logger.info(f"JSON output mode: searching for {count} videos")
+        self.logger.debug(f"JSON output mode: searching for {search_count} videos to get {count} for JSON output")
         
         try:
+            # Enhanced duplicate checking for JSON mode
+            # Create a temporary directory to check for existing JSON output duplicates
+            clean_query = re.sub(r'[^\w\s-]', '', query)
+            clean_query = re.sub(r'[-\s]+', '_', clean_query)
+            clean_query = clean_query.lower().strip('_')
+            
+            # Check for existing JSON files that might contain duplicates
+            existing_json_files = list(self.download_dir.glob(f"{clean_query}*.json"))
+            existing_video_ids_in_json = set()
+            
+            if existing_json_files:
+                self.logger.debug(f"Found {len(existing_json_files)} existing JSON files, checking for duplicate video IDs...")
+                for json_file in existing_json_files:
+                    try:
+                        with open(json_file, 'r', encoding='utf-8') as f:
+                            json_data = json.load(f)
+                            # Extract video IDs from existing JSON structure
+                            for label_data in json_data.values():
+                                if isinstance(label_data, dict):
+                                    for query_data in label_data.values():
+                                        if isinstance(query_data, list):
+                                            for video_entry in query_data:
+                                                if isinstance(video_entry, dict) and 'id' in video_entry:
+                                                    existing_video_ids_in_json.add(str(video_entry['id']))
+                    except (json.JSONDecodeError, KeyError, TypeError) as e:
+                        self.logger.warning(f"Could not parse existing JSON file {json_file}: {e}")
+                
+                if existing_video_ids_in_json:
+                    self.logger.debug(f"Found {len(existing_video_ids_in_json)} video IDs in existing JSON files")
+                    # Add these to global tracking to avoid duplicates
+                    self.global_seen_video_ids.update(existing_video_ids_in_json)
+            
+            # Calculate ignore list impact and adjust search parameters accordingly
+            ignore_list_size = len(self.current_ignored_video_ids) if self.use_ignore_list else 0
+            total_excluded_count = ignore_list_size + len(existing_video_ids_in_json)
+            
             # NEW LOGIC: Search iteratively until we have enough videos that pass filters
-            filtered_videos = []
-            all_videos_found = []
+            all_candidate_videos = []
             total_filtered_count = 0
             search_attempts = 0
-            max_search_attempts = 5
-            videos_per_attempt = count * 2  # Start with 2x multiplier
             
-            while len(filtered_videos) < count and search_attempts < max_search_attempts:
-                search_attempts += 1
-                current_search_limit = videos_per_attempt * search_attempts
+            # Adjust search parameters based on ignore list and existing JSON size
+            base_max_attempts = 5
+            base_multiplier = 2
+            
+            if total_excluded_count > 0:
+                # For large exclude lists (ignore + existing JSON), be more aggressive
+                exclude_ratio_estimate = min(total_excluded_count / 1000, 0.6)  # Cap at 60% estimated exclude ratio
+                search_multiplier = max(1.5, 1 + (exclude_ratio_estimate * 2))
                 
-                self.logger.info(f"Search attempt {search_attempts}: Looking for {current_search_limit} videos to find {count} that pass filters")
+                max_search_attempts = int(base_max_attempts * search_multiplier)
+                videos_per_attempt_multiplier = max(base_multiplier, base_multiplier * search_multiplier)
+                
+                if ignore_list_size > 0:
+                    print(f"🚫 Ignore list contains {ignore_list_size} video IDs")
+                if existing_video_ids_in_json:
+                    print(f"📄 Found {len(existing_video_ids_in_json)} video IDs in existing JSON files")
+                print(f"📈 Expanding JSON search: max_attempts={max_search_attempts}, search_multiplier={videos_per_attempt_multiplier:.1f}x")
+            else:
+                max_search_attempts = base_max_attempts
+                videos_per_attempt_multiplier = base_multiplier
+            
+            videos_per_attempt = search_count * videos_per_attempt_multiplier  # Start with calculated multiplier
+            
+            print(f"Searching for {count} videos for JSON output...")
+            
+            # Phase 1: Collect candidate videos
+            while len(all_candidate_videos) < search_count and search_attempts < max_search_attempts:
+                search_attempts += 1
+                current_search_limit = int(videos_per_attempt_multiplier * search_attempts * search_count)
+                
+                search_msg = f"Search attempt {search_attempts}: Looking for {current_search_limit} videos to collect {search_count} candidates"
+                if total_excluded_count > 0:
+                    search_msg += f" (accounting for {total_excluded_count} excluded IDs)"
+                self.logger.debug(search_msg)
                 
                 # Search for videos
                 videos = self.search_videos(query, current_search_limit)
@@ -1541,64 +2796,119 @@ class AdobeStockScraper:
                     self.logger.warning("No videos found for the given query")
                     break
                 
-                # Filter out duplicates from previous searches
+                # Filter out duplicates from previous searches and existing JSON files
                 new_videos = []
-                existing_ids = {v.get('id') for v in all_videos_found}
+                existing_ids = {v.get('id') for v in all_candidate_videos}
                 for video in videos:
-                    if video.get('id') not in existing_ids:
+                    video_id = video.get('id')
+                    # Check against multiple sources of duplicates
+                    if video_id and video_id not in existing_ids and video_id not in existing_video_ids_in_json:
                         new_videos.append(video)
-                        all_videos_found.append(video)
+                        all_candidate_videos.append(video)
+                    elif video_id in existing_video_ids_in_json:
+                        self.logger.debug(f"Video {video_id} already exists in JSON files, skipping")
                 
                 if not new_videos:
-                    self.logger.info(f"No new videos found in search attempt {search_attempts}")
+                    self.logger.debug(f"No new videos found in search attempt {search_attempts} - all were duplicates")
                     break
                 
-                self.logger.info(f"Found {len(new_videos)} new videos in search attempt {search_attempts}")
+                self.logger.debug(f"Found {len(new_videos)} new videos in search attempt {search_attempts}")
                 
-                # Apply filtering to new videos and add to our filtered collection
+                # Apply filtering to new videos
                 attempt_filtered_count = 0
+                valid_candidates = []
                 for video in new_videos:
                     if self.should_filter_video(video):
                         attempt_filtered_count += 1
                         total_filtered_count += 1
+                        # Remove from all_candidate_videos since it was filtered out
+                        if video in all_candidate_videos:
+                            all_candidate_videos.remove(video)
                         continue
-                    
-                    # Only add if we haven't reached our needed count yet
-                    if len(filtered_videos) < count:
-                        filtered_videos.append(video)
+                    else:
+                        valid_candidates.append(video)
                 
                 if attempt_filtered_count > 0:
-                    self.logger.info(f"Filtered out {attempt_filtered_count} videos in search attempt {search_attempts}")
+                    self.logger.debug(f"Filtered out {attempt_filtered_count} videos in search attempt {search_attempts}")
                 
-                self.logger.info(f"Now have {len(filtered_videos)} videos that pass filters (need {count})")
+                self.logger.debug(f"Now have {len(all_candidate_videos)} valid candidate videos (target: {search_count})")
                 
-                # If we have enough, we can stop searching
-                if len(filtered_videos) >= count:
+                # If we have enough valid candidates, we can stop searching
+                if len(all_candidate_videos) >= search_count:
                     break
                 
                 # Increase multiplier for next attempt if we're still short
-                videos_per_attempt = int(videos_per_attempt * 1.5)
+                videos_per_attempt_multiplier = videos_per_attempt_multiplier * 1.5
+            
+            # Phase 2: Apply sampling if enabled
+            videos_to_process = all_candidate_videos[:search_count]  # Limit to search_count
+            
+            if self.sample_from and self.sample_from > count and len(videos_to_process) >= count:
+                # Randomly sample the count from the candidate pool
+                videos_to_process = random.sample(videos_to_process, count)
+                print(f"Randomly sampled {len(videos_to_process)} videos from {len(all_candidate_videos)} candidates")
+                
+                # Log some info about the sampling
+                sampled_titles = [v.get('title', 'Unknown')[:50] + ('...' if len(v.get('title', '')) > 50 else '') for v in videos_to_process[:3]]
+                if len(videos_to_process) > 3:
+                    sampled_titles.append(f"... and {len(videos_to_process) - 3} more")
+                self.logger.debug(f"JSON sample includes: {sampled_titles}")
+            else:
+                # Take the first count videos
+                videos_to_process = all_candidate_videos[:count]
+                if self.sample_from and len(all_candidate_videos) < count:
+                    self.logger.debug(f"Not enough candidates for effective sampling, using all {len(videos_to_process)} available videos")
             
             # Final logging
             if total_filtered_count > 0:
-                self.logger.info(f"Total videos filtered out: {total_filtered_count}")
+                self.logger.debug(f"Total videos filtered out: {total_filtered_count}")
             
-            if len(filtered_videos) < count:
-                self.logger.warning(f"Could only find {len(filtered_videos)} videos that pass filters out of {count} needed")
+            if existing_video_ids_in_json:
+                self.logger.debug(f"Total videos skipped as duplicates from existing JSON: {len(existing_video_ids_in_json)}")
             
-            # Limit to requested count (in case we found more than needed)
-            processed_videos = filtered_videos[:count]
-            self.logger.info(f"Processing {len(processed_videos)} videos for JSON output")
+            if ignore_list_size > 0:
+                self.logger.debug(f"Total videos skipped from ignore list: {ignore_list_size}")
+            
+            if len(videos_to_process) < count:
+                warning_msg = f"Warning: Could only find {len(videos_to_process)} videos that pass filters out of {count} requested"
+                if total_excluded_count > 0:
+                    warning_msg += f" (excluded {total_excluded_count} IDs from ignore list and existing JSON)"
+                print(warning_msg)
+            
+            print(f"Creating JSON output for {len(videos_to_process)} videos...")
             
             # Create JSON output
-            json_data = self.create_json_output(processed_videos, query)
+            json_data = self.create_json_output(videos_to_process, query)
+            
+            # Add sampling metadata to JSON if applicable
+            metadata_info = {
+                "generation_timestamp": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+                "search_attempts": search_attempts,
+                "ignore_list_size": ignore_list_size,
+                "existing_json_duplicates": len(existing_video_ids_in_json),
+                "total_excluded_count": total_excluded_count
+            }
+            
+            if self.sample_from:
+                metadata_info["sampling_info"] = {
+                    "sample_from": self.sample_from,
+                    "requested_count": count,
+                    "candidates_found": len(all_candidate_videos),
+                    "final_count": len(videos_to_process),
+                    "was_sampled": bool(self.sample_from > count and len(all_candidate_videos) >= count)
+                }
+            
+            json_data["_metadata"] = metadata_info
             
             # Save JSON to file
             json_filepath = self.save_json_output(json_data, query)
             
-            self.logger.info(f"JSON output complete. {len(processed_videos)} videos processed and saved to {json_filepath}")
+            print(f"JSON output complete: {len(videos_to_process)} videos saved to {json_filepath}")
             
-            return len(processed_videos)
+            if self.sample_from and len(all_candidate_videos) > 0:
+                self.logger.debug(f"JSON sampling summary: Found {len(all_candidate_videos)} candidates, included {len(videos_to_process)} in final JSON")
+            
+            return len(videos_to_process)
             
         except Exception as e:
             self.logger.error(f"Error in JSON output mode: {e}")
@@ -1667,99 +2977,219 @@ class AdobeStockScraper:
         try:
             with open(filepath, 'w', encoding='utf-8') as f:
                 json.dump(json_data, f, indent=2, ensure_ascii=False)
-            self.logger.info(f"JSON output saved to: {filepath}")
+            self.logger.debug(f"JSON output saved to: {filepath}")
             return str(filepath)
         except Exception as e:
             self.logger.error(f"Failed to save JSON output: {e}")
             raise
 
+    def add_metadata_to_ignore_list(self, metadata_file_path: str) -> bool:
+        """
+        Add video IDs from a metadata file to the ignore list.
+        
+        Args:
+            metadata_file_path: Path to the metadata JSON file
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        if not self.ignore_manager:
+            self.logger.error("Ignore list functionality not available. Make sure add_to_ignore_list.py is in the same directory.")
+            return False
+        
+        try:
+            metadata_path = Path(metadata_file_path)
+            if not metadata_path.exists():
+                self.logger.error(f"Metadata file not found: {metadata_path}")
+                return False
+            
+            # Extract video IDs from metadata file using the same logic as the standalone script
+            from add_to_ignore_list import extract_video_ids_from_metadata
+            video_ids = extract_video_ids_from_metadata(metadata_path)
+            
+            if not video_ids:
+                self.logger.warning("No video IDs found in metadata file")
+                return True
+            
+            # Add video IDs to ignore list
+            new_count = self.ignore_manager.add_video_ids(video_ids)
+            
+            # Save the updated ignore list
+            if self.ignore_manager.save_ignore_list():
+                self.logger.info(f"✅ Added {new_count} new video IDs to ignore list from {metadata_path}")
+                self.logger.info(f"   Total ignored video IDs: {self.ignore_manager.get_ignore_count()}")
+                
+                if new_count == 0:
+                    self.logger.info("   (All video IDs were already in the ignore list)")
+                return True
+            else:
+                self.logger.error("Failed to save ignore list")
+                return False
+                
+        except Exception as e:
+            self.logger.error(f"Error adding metadata to ignore list: {e}")
+            return False
+
 
 def main():
     parser = argparse.ArgumentParser(description='Adobe Stock Video Thumbnail Scraper (Authentication Required)')
-    parser.add_argument('--query', '-q', required=True, help='Search query for videos')
+    parser.add_argument('--query', '-q', help='Search query for videos (required unless --random is used)')
+    parser.add_argument('--random', '-r', action='store_true', help='Scrape completely random videos from various categories instead of a specific query')
     parser.add_argument('--count', '-c', type=int, default=10, help='Number of videos to download (default: 10)')
     parser.add_argument('--output', '-o', default='downloads', help='Output directory (default: downloads)')
     parser.add_argument('--delay', '-d', type=float, default=1.0, help='Delay between requests in seconds (default: 1.0)')
     parser.add_argument('--no-login', action='store_true', help='Skip browser-based authentication (may result in 401 errors)')
-    parser.add_argument('--max-duration', type=int, help='Maximum video duration in seconds (excludes longer videos)')
-    parser.add_argument('--min-duration', type=int, help='Minimum video duration in seconds (excludes shorter videos)')
+    parser.add_argument('--max-duration', type=int, help='Maximum video duration in seconds (excludes longer videos). Note: Duration filtering will check video metadata before download if not available in search results.')
+    parser.add_argument('--min-duration', type=int, help='Minimum video duration in seconds (excludes shorter videos). Note: Duration filtering will check video metadata before download if not available in search results.')
+    parser.add_argument('--max-size', type=str, help='Maximum video file size in bytes (excludes larger videos). Supports suffixes: K/KB (kilobytes), M/MB (megabytes), G/GB (gigabytes). Example: --max-size 50M for 50 megabytes.')
     parser.add_argument('--exclude-titles', nargs='*', help='Text patterns to exclude from video titles (case-insensitive)')
     parser.add_argument('--json-output', action='store_true', help='Create JSON dictionary instead of downloading videos')
     parser.add_argument('--intended-label', type=str, help='Label for JSON output structure (required when using --json-output)')
+    parser.add_argument('--sample-from', type=int, help='Search for this many videos and randomly sample the requested count from them. Must be greater than --count. Useful for getting diverse/random results instead of just the first N videos found.')
+    parser.add_argument('--no-ignore-list', action='store_true', help='Disable ignore list functionality - do not skip videos from the ignore_list directory')
     
     args = parser.parse_args()
+    
+    # Validate query/random arguments - exactly one must be provided
+    if not args.query and not args.random:
+        parser.error("Either --query or --random must be specified")
+    if args.query and args.random:
+        parser.error("--query and --random are mutually exclusive - use only one")
     
     # Validate JSON output arguments
     if args.json_output and not args.intended_label:
         parser.error("--intended-label is required when using --json-output")
     
+    # Validate sampling arguments
+    if args.sample_from is not None:
+        if args.sample_from <= 0:
+            parser.error("--sample-from must be a positive integer")
+        if args.sample_from <= args.count:
+            parser.error("--sample-from must be greater than --count for sampling to be effective")
+    
+    # Parse max-size argument to handle suffixes
+    max_size_bytes = None
+    if args.max_size:
+        max_size_str = str(args.max_size).upper().strip()
+        try:
+            if max_size_str.endswith(('K', 'KB')):
+                max_size_bytes = int(float(max_size_str.rstrip('KB'))) * 1024
+            elif max_size_str.endswith(('M', 'MB')):
+                max_size_bytes = int(float(max_size_str.rstrip('MB'))) * 1024 * 1024
+            elif max_size_str.endswith(('G', 'GB')):
+                max_size_bytes = int(float(max_size_str.rstrip('GB'))) * 1024 * 1024 * 1024
+            else:
+                max_size_bytes = int(float(max_size_str))
+        except ValueError:
+            parser.error(f"Invalid max-size value: {args.max_size}. Use a number optionally followed by K/KB, M/MB, or G/GB.")
+    
     # Create scraper instance (authentication enabled by default)
     use_auth = not args.no_login  # Reverse the logic - auth is default, --no-login disables it
+    use_ignore_list = not args.no_ignore_list  # Reverse the logic - ignore list is default, --no-ignore-list disables it
     scraper = AdobeStockScraper(
         download_dir=args.output, 
         delay=args.delay, 
         use_auth=use_auth,
         max_duration_seconds=args.max_duration,
         min_duration_seconds=args.min_duration,
+        max_size_bytes=max_size_bytes,
         exclude_title_patterns=args.exclude_titles or [],
         json_output=args.json_output,
-        intended_label=args.intended_label
+        intended_label=args.intended_label,
+        sample_from=args.sample_from,
+        query=args.query,  # Pass query to enable query-specific ignore lists
+        random_mode=args.random,
+        use_ignore_list=use_ignore_list
     )
     
-    # Create clean query name for the subdirectory
-    clean_query = re.sub(r'[^\w\s-]', '', args.query)
-    clean_query = re.sub(r'[-\s]+', '_', clean_query)
-    clean_query = clean_query.lower().strip('_')
+    # Create clean query name for the subdirectory (only for specific queries)
+    if args.query:
+        clean_query = re.sub(r'[^\w\s-]', '', args.query)
+        clean_query = re.sub(r'[-\s]+', '_', clean_query)
+        clean_query = clean_query.lower().strip('_')
+    else:
+        clean_query = "random_videos"
     
     # Run scraping
     try:
-        if args.json_output:
-            print(f"\n📄 JSON OUTPUT MODE")
-            print(f"Creating JSON dictionary for query: '{args.query}'")
-            print(f"Intended label: '{args.intended_label}'")
-            print(f"Number of videos to process: {args.count}")
-            if use_auth:
-                print("Authentication will be used if required.")
-            else:
-                print("No authentication - some videos may not be accessible.")
+        # Print configuration
+        print(f"\n{'='*60}")
+        print(f"ADOBE STOCK VIDEO {'JSON OUTPUT' if args.json_output else 'DOWNLOADER'}")
+        print(f"{'='*60}")
+        
+        if args.random:
+            print(f"🎲 Mode: Random videos from diverse categories")
         else:
-            if use_auth:
-                print("\n🔐 AUTHENTICATION MODE (DEFAULT)")
-                print("You will be prompted to log in through your browser.")
-                print("Make sure you have Chrome installed and chromedriver available.")
-            else:
-                print("\n⚠️  NO AUTHENTICATION MODE")
-                print("Running without authentication. Some videos may not be accessible.")
-                print("You may encounter 401 errors for premium content.")
+            print(f"Query: '{args.query}'")
+            
+        print(f"Count: {args.count}")
         
-        print(f"\nQuery: '{args.query}'")
-        print(f"{'Videos to process' if args.json_output else 'Videos to download'}: {args.count}")
+        if args.sample_from:
+            print(f"🎲 Sampling: {args.sample_from} → {args.count} videos")
+        if args.json_output:
+            print(f"📄 Mode: JSON Output (label: '{args.intended_label}')")
+        else:
+            print(f"📥 Mode: Download videos")
+        
+        # Show filters if any
+        filters = []
         if args.max_duration:
-            print(f"Maximum duration: {args.max_duration} seconds")
+            filters.append(f"max {args.max_duration}s")
         if args.min_duration:
-            print(f"Minimum duration: {args.min_duration} seconds")
+            filters.append(f"min {args.min_duration}s")
+        if max_size_bytes:
+            if max_size_bytes >= 1024 * 1024 * 1024:
+                filters.append(f"max {max_size_bytes / (1024*1024*1024):.1f}GB")
+            elif max_size_bytes >= 1024 * 1024:
+                filters.append(f"max {max_size_bytes / (1024*1024):.1f}MB")
+            else:
+                filters.append(f"max {max_size_bytes / 1024:.1f}KB")
         if args.exclude_titles:
-            print(f"Excluding titles containing: {args.exclude_titles}")
-        print(f"Output directory: {args.output}")
-        if not args.json_output:
-            print(f"Videos will be saved to: {args.output}/{clean_query}/")
-        print("-" * 60)
+            filters.append(f"exclude: {args.exclude_titles}")
         
+        if filters:
+            print(f"🔍 Filters: {', '.join(filters)}")
+        
+        print(f"📂 Output: {args.output}{('/' + clean_query) if not args.json_output else ''}")
+        
+        if use_auth:
+            print("🔐 Authentication: Enabled")
+        else:
+            print("⚠️  Authentication: Disabled")
+        
+        if use_ignore_list:
+            print("🚫 Ignore List: Enabled")
+        else:
+            print("⚠️  Ignore List: Disabled")
+        
+        print(f"{'='*60}")
+        
+        # Pass query (which will be None for random mode)
         successful = scraper.scrape_and_download(args.query, args.count)
         
+        # Show completion message
+        print(f"\n{'='*60}")
         if args.json_output:
-            print(f"\n✅ JSON creation complete!")
-            print(f"Processed {successful} videos")
-            print(f"JSON file saved in: {args.output}/")
+            print(f"✅ JSON OUTPUT COMPLETE")
+            print(f"Videos processed: {successful}")
+            print(f"File saved to: {args.output}/")
         else:
-            print(f"\n✅ Download complete!")
-            print(f"Successfully downloaded {successful} videos")
-            print(f"Files saved to: {args.output}/{clean_query}/")
+            print(f"✅ DOWNLOAD COMPLETE")
+            print(f"Videos downloaded: {successful}")
+            if args.random:
+                print(f"Files saved to: {args.output}/random_videos/")
+            else:
+                print(f"Files saved to: {args.output}/{clean_query}/")
+        print(f"{'='*60}")
         
     except KeyboardInterrupt:
-        print("\n\n❌ Download interrupted by user")
+        print(f"\n\n{'='*60}")
+        print("❌ INTERRUPTED BY USER")
+        print(f"{'='*60}")
     except Exception as e:
-        print(f"\n❌ Error: {e}")
+        print(f"\n{'='*60}")
+        print(f"❌ ERROR: {e}")
+        print(f"{'='*60}")
         import traceback
         traceback.print_exc()
 
