@@ -3,4 +3,4 @@ beautifulsoup4>=4.12.0
 lxml>=4.9.0
 urllib3>=2.0.0
 selenium
-chromedriver-autoinstaller
+webdriver-manager

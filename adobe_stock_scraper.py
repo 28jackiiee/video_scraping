@@ -189,6 +189,10 @@ class AdobeStockScraper:
             "holiday", "christmas", "halloween", "new year", "celebration", "festival"
         ]
         
+        # Set up logging early so it can be used throughout initialization
+        logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+        self.logger = logging.getLogger(__name__)
+        
         # Load query-specific ignore list (only if ignore list is enabled)
         if self.use_ignore_list:
             self.current_ignored_video_ids = self._load_query_specific_ignore_list(query, ignore_list_path)
@@ -220,10 +224,6 @@ class AdobeStockScraper:
             'Sec-Fetch-Site': 'none',
         })
         
-        # Set up logging
-        logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-        self.logger = logging.getLogger(__name__)
-        
         # Only log filtering settings if they're actually set
         if self.max_duration_seconds:
             self.logger.debug(f"Video duration filter: max {self.max_duration_seconds} seconds")
@@ -247,7 +247,15 @@ class AdobeStockScraper:
     
         # Try to load existing cookies if authentication is requested
         if self.use_auth:
-            self.load_cookies()
+            cookies_loaded = self.load_cookies()
+            
+            # If cookies couldn't be loaded, trigger browser authentication
+            if not cookies_loaded:
+                self.logger.info("No existing cookies found. Browser login required...")
+                success = self.authenticate_with_browser()
+                if not success:
+                    self.logger.warning("Browser authentication failed. Continuing without authentication - may result in 401 errors for downloads.")
+                    self.authenticated = False
 
     def get_random_search_queries(self, count: int) -> List[str]:
         """

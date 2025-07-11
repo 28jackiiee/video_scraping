@@ -20,12 +20,6 @@ This repository contains a suite of Python scripts designed to scrape, download,
 - Read and display detailed metadata from downloaded video directories, including original query, download counts, and video ID to filename mappings
 - List all download directories and their summaries
 
-### Video Mapping Updater (update_video_mappings.py)
-
-- Update video ID to filename mappings for existing video files
-- Extracts video IDs from filenames
-- Attempts to match video files with existing JSON metadata based on titles
-
 ### Ignore List Manager (add_to_ignore_list.py)
 
 - Add video IDs from metadata files to query-specific ignore lists
@@ -43,15 +37,15 @@ This repository contains a suite of Python scripts designed to scrape, download,
 ### 1. Clone the Repository (or download files)
 
 ```bash
-git clone https://github.com/yourusername/adobe-stock-scraper.git
-cd adobe-stock-scraper
+git clone https://github.com/28jackiiee/video_scraping.git
+cd scraping
 ```
 
 ### 2. Create a Virtual Environment (Recommended)
 
 ```bash
-python3 -m venv venv
-source venv/bin/activate
+conda create --name scraping python=3.10
+conda activate scraping
 ```
 
 ### 3. Install Dependencies
@@ -59,36 +53,25 @@ source venv/bin/activate
 The requirements.txt file lists the necessary Python packages.
 
 ```bash
-pip install -r scraping/requirements.txt
+pip install -r requirements.txt
+conda install -c conda-forge ffmpeg
 ```
 
-**Note**: The requests, beautifulsoup4, lxml, urllib3, selenium, and chromedriver-autoinstaller packages are required.
-
-### 4. Install ffmpeg and ffprobe (for duration checking)
-
-The scraper uses ffprobe to accurately determine video durations.
+### 4. Install chrome driver (for selenium)
 
 **macOS (Homebrew):**
 ```bash
-brew install ffmpeg
+brew install chromedriver
 ```
 
 **Linux (apt):**
 ```bash
-sudo apt update
-sudo apt install ffmpeg
+python linux_webdriver_install.py
 ```
 
-**Windows**: Download from the FFmpeg website and add to your system's PATH.
-
-### 5. Install PyTorch and CLIP (for video filtering)
+### 5. Install PyTorch and CLIP (for video filtering) (optional)
 
 The video_filter.py and video_filter_m4.py scripts require specific installations for PyTorch and CLIP.
-
-**General (CPU):**
-```bash
-pip install torch torchvision clip-by-openai pillow opencv-python scikit-learn
-```
 
 **Apple Silicon (M1/M2/M3/M4 with MPS):**
 ```bash
@@ -111,11 +94,6 @@ This script is used for downloading or generating metadata for videos from Adobe
 **Basic Download:**
 ```bash
 python adobe_stock_scraper.py --query "nature landscape" --count 10
-```
-
-**Random Video Scraping:**
-```bash
-python adobe_stock_scraper.py --random --count 20
 ```
 
 **Random Sampling (Search many, pick few):**
@@ -158,15 +136,7 @@ python read_metadata.py downloads/your_query_folder
 python read_metadata.py
 ```
 
-### 3. Video Mapping Updater (update_video_mappings.py)
-
-Use this script to update the query_metadata.json file in a download directory, especially if some video IDs are missing from the mappings.
-
-```bash
-python update_video_mappings.py /Users/jackieli/Downloads/prof_code/scraping_vis/downloads/testing/Dolly\ Zoom/dolly_zoom
-```
-
-### 4. Ignore List Manager (add_to_ignore_list.py)
+### 3. Ignore List Manager (add_to_ignore_list.py)
 
 This utility allows you to manage lists of video IDs that the scraper should ignore in future runs. Query-specific ignore lists are created automatically.
 
